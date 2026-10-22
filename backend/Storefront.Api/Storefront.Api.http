@@ -53,3 +53,37 @@ Content-Type: application/json
   "customer": { "name": "A", "email": "not-an-email" },
   "items": [ { "productId": 2, "quantity": 0 } ]
 }
+
+### Retry-safe checkout: send the same Idempotency-Key twice; the second response repeats the first order
+POST {{api}}/api/checkout
+Content-Type: application/json
+Idempotency-Key: 9f1c2b7e-3d4a-4f6b-8c1d-2e5f7a9b0c11
+
+{
+  "customer": { "name": "Ada Lovelace", "email": "ada@example.com" },
+  "items": [ { "productId": 2, "quantity": 1 } ],
+  "expectedTotal": 30.07
+}
+
+### Create an account
+POST {{api}}/api/account/register
+Content-Type: application/json
+
+{ "email": "ada@example.com", "password": "Str0ng!Passw0rd" }
+
+### Sign in (copy accessToken into @token below)
+POST {{api}}/api/account/login
+Content-Type: application/json
+
+{ "email": "ada@example.com", "password": "Str0ng!Passw0rd" }
+
+###
+@token = paste-access-token-here
+
+### Your orders (401 without a token)
+GET {{api}}/api/orders
+Authorization: Bearer {{token}}
+
+### One of your orders (404 if it isn't yours)
+GET {{api}}/api/orders/DEMO-20261022-XXXXXX
+Authorization: Bearer {{token}}

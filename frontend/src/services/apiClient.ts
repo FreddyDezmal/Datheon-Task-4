@@ -50,6 +50,7 @@ interface RequestOptions {
   method?: 'GET' | 'POST';
   body?: unknown;
   signal?: AbortSignal;
+  headers?: Record<string, string>;
   timeoutMs?: number;
 }
 
@@ -60,7 +61,7 @@ interface RequestOptions {
 export async function apiRequest<T>(
   path: string,
   parse: (data: unknown) => T,
-  { method = 'GET', body, signal, timeoutMs = REQUEST_TIMEOUT_MS }: RequestOptions = {},
+  { method = 'GET', body, signal, headers, timeoutMs = REQUEST_TIMEOUT_MS }: RequestOptions = {},
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -76,7 +77,11 @@ export async function apiRequest<T>(
   try {
     const init: RequestInit = {
       method,
-      headers: body === undefined ? { Accept: 'application/json' } : { Accept: 'application/json', 'Content-Type': 'application/json' },
+      headers: {
+        Accept: 'application/json',
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...headers,
+      },
       signal: controller.signal,
     };
     if (body !== undefined) init.body = JSON.stringify(body);

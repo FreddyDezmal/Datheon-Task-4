@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Storefront.Api.Configuration;
+using Storefront.Api.Data;
+using Storefront.Api.Data.Entities;
 using Storefront.Api.Middleware;
+using Storefront.Api.Security;
 using Storefront.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -26,6 +29,7 @@ var corsSettings = builder.Configuration.GetSection(CorsSettings.SectionName).Ge
 // ---- Infrastructure ----
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddMemoryCache();
+builder.Services.AddStorefrontDatabase(builder.Configuration, builder.Environment);
 
 builder.Services.AddHttpClient<IFakeStoreClient, FakeStoreClient>((services, client) =>
 {
@@ -36,12 +40,22 @@ builder.Services.AddHttpClient<IFakeStoreClient, FakeStoreClient>((services, cli
     client.DefaultRequestHeaders.UserAgent.ParseAdd("Storefront.Api/1.0");
 });
 
+// ---- Security ----
+builder.Services.AddStorefrontAuthentication();
+builder.Services.AddStorefrontRateLimiting(builder.Configuration);
+builder.Services.AddHsts(options =>
+{
+    options.MaxAge = TimeSpan.FromDays(365);
+    options.IncludeSubDomains = true;
+});
+
 // ---- Application services ----
 builder.Services.AddScoped<IProductCatalogService, ProductCatalogService>();
 builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
 builder.Services.AddSingleton<ICheckoutRequestValidator, CheckoutRequestValidator>();
 builder.Services.AddSingleton<IOrderReferenceGenerator, OrderReferenceGenerator>();
 builder.Services.AddScoped<ICheckoutService, CheckoutService>();
+builder.Services.AddScoped<IOrderQueryService, OrderQueryService>();
 
 // ---- Web ----
 builder.Services.AddControllers();
@@ -55,9 +69,14 @@ builder.Services.AddProblemDetails(options =>
         {
             problem.Extensions["code"] = problem switch
             {
-                ValidationProblemDetails => "VALIDATION_FAILED",
+                // Base type: covers MVC model validation and Identity's minimal-API endpoints alike.
+                HttpValidationProblemDetails => "VALIDATION_FAILED",
+                { Status: StatusCodes.Status401Unauthorized } => "UNAUTHORIZED",
+                { Status: StatusCodes.Status403Forbidden } => "FORBIDDEN",
                 { Status: StatusCodes.Status404NotFound } => "NOT_FOUND",
+                { Status: StatusCodes.Status405MethodNotAllowed } => "METHOD_NOT_ALLOWED",
                 { Status: StatusCodes.Status415UnsupportedMediaType } => "UNSUPPORTED_MEDIA_TYPE",
+                { Status: StatusCodes.Status429TooManyRequests } => "TOO_MANY_REQUESTS",
                 _ => "ERROR",
             };
         }
@@ -68,7 +87,8 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddCors(options => options.AddPolicy(CorsSettings.PolicyName, policy => policy
     .WithOrigins(corsSettings.AllowedOrigins)
     .WithMethods("GET", "POST")
-    .WithHeaders("Content-Type", "Accept")));
+    .WithHeaders("Content-Type", "Accept", "Authorization", IdempotencyKeys.HeaderName)
+    .WithExposedHeaders(IdempotencyKeys.ReplayedHeaderName, "Retry-After")));
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -80,17 +100,37 @@ if (corsSettings.AllowedOrigins.Length == 0)
     app.Logger.LogWarning("Cors:AllowedOrigins is empty, so browsers on other origins cannot call this API.");
 }
 
+await app.ApplyMigrationsIfConfiguredAsync();
+
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+app.UseMiddleware<SecurityHeadersMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+else
+{
+    // Development runs on plain http://localhost:5080 for the Vite frontend; everywhere else is HTTPS-only.
+    app.UseHsts();
+    app.UseHttpsRedirection();
+}
 
 app.UseCors(CorsSettings.PolicyName);
+app.UseAuthentication();
+app.UseRateLimiter();
+app.UseAuthorization();
+
 app.MapControllers();
+app.MapGroup("/api/account")
+    .WithTags("Account")
+    .MapIdentityApi<StorefrontUser>()
+    .RequireRateLimiting(RateLimitPolicies.Account);
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).ExcludeFromDescription();
 
 app.Run();
+
+/// <summary>Exposed so integration tests can host the app with WebApplicationFactory.</summary>
+public partial class Program;

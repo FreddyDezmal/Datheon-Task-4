@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Storefront.Api.Data;
 using Storefront.Api.Exceptions;
 using Storefront.Api.Services;
 
@@ -8,6 +11,8 @@ namespace Storefront.Api.Middleware;
 /// <summary>
 /// Converts exceptions into RFC 7807 problem details. Every problem carries a machine-readable
 /// "code" extension so the frontend can choose a recovery action without parsing messages.
+/// Server-side failures (5xx) are logged with the exception; their responses never include
+/// exception messages, SQL, stack traces or configuration values.
 /// </summary>
 public sealed class GlobalExceptionHandler(
     IProblemDetailsService problemDetailsService,
@@ -76,6 +81,49 @@ public sealed class GlobalExceptionHandler(
                 },
             },
             "PRICE_CHANGED"),
+
+        IdempotencyKeyReusedException => WithCode(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status422UnprocessableEntity,
+                Title = "This Idempotency-Key was already used for a different order.",
+                Detail = "Use a new Idempotency-Key for each new order; reuse a key only to retry the same request.",
+            },
+            "IDEMPOTENCY_KEY_REUSED"),
+
+        DbUpdateConcurrencyException => WithCode(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status409Conflict,
+                Title = "The data was changed by another request.",
+                Detail = "Reload and try again.",
+            },
+            "CONCURRENCY_CONFLICT"),
+
+        _ when DatabaseErrors.IsBusy(exception) => WithCode(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "The database is busy.",
+                Detail = "Please try again in a moment.",
+            },
+            "DATABASE_BUSY"),
+
+        DbUpdateException when DatabaseErrors.IsConstraintViolation(exception) => WithCode(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status409Conflict,
+                Title = "The request conflicts with existing data.",
+            },
+            "CONSTRAINT_CONFLICT"),
+
+        DbUpdateException or SqliteException => WithCode(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status500InternalServerError,
+                Title = "The database could not complete the request.",
+            },
+            "DATABASE_ERROR"),
 
         UpstreamServiceException { Kind: UpstreamFailureKind.Timeout } => WithCode(
             new ProblemDetails

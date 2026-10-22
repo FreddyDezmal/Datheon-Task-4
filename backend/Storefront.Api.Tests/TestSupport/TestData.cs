@@ -2,6 +2,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Storefront.Api.Configuration;
+using Storefront.Api.Data;
 using Storefront.Api.Models;
 using Storefront.Api.Services;
 
@@ -45,15 +46,19 @@ internal static class TestData
         new MemoryCache(new MemoryCacheOptions()),
         Options.Create(new FakeStoreOptions { CatalogueCacheSeconds = cacheSeconds }));
 
-    public static CheckoutService CheckoutService(IFakeStoreClient client, TimeProvider? time = null)
+    public static readonly DateTimeOffset Now = new(2026, 10, 22, 10, 0, 0, TimeSpan.Zero);
+
+    public static CheckoutService CheckoutService(
+        IFakeStoreClient client, StorefrontDbContext db, TimeProvider? time = null, IOrderReferenceGenerator? references = null)
     {
         var pricing = PricingOptions();
-        time ??= new FixedTimeProvider(new DateTimeOffset(2026, 10, 22, 10, 0, 0, TimeSpan.Zero));
+        time ??= new FixedTimeProvider(Now);
         return new CheckoutService(
             new CheckoutRequestValidator(pricing),
             CatalogService(client),
             new PricingCalculator(pricing),
-            new OrderReferenceGenerator(time),
+            references ?? new OrderReferenceGenerator(time),
+            db,
             time,
             NullLogger<CheckoutService>.Instance);
     }

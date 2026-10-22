@@ -3,7 +3,7 @@ import { useCart } from '../context/CartContext';
 import { usePricingRules } from '../context/StoreConfigContext';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 import { ApiError } from '../services/apiClient';
-import { submitCheckout } from '../services/checkoutService';
+import { createIdempotencyKey, submitCheckout } from '../services/checkoutService';
 import { parseOrderQuote } from '../services/responseParsers';
 import type { CheckoutConfirmation, CustomerDetails } from '../types/checkout';
 import { validateCustomer, type CustomerErrors } from '../utils/checkoutValidation';
@@ -41,6 +41,8 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
   const [fieldErrors, setFieldErrors] = useState<CustomerErrors>({});
   const [problem, setProblem] = useState<CheckoutProblem | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // One key per distinct order: a retry of the same request reuses it, any change gets a new one.
+  const idempotencyRef = useRef<{ body: string; key: string } | null>(null);
 
   // Start fresh each time the dialog opens, but keep typed details for convenience.
   useEffect(() => {
@@ -73,15 +75,22 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const request = {
+      customer: { name: customer.name.trim(), email: customer.email.trim() },
+      items: cart.items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
+      expectedTotal: minorToMajor(cart.totals.totalMinor),
+    };
+    const body = JSON.stringify(request);
+    if (idempotencyRef.current?.body !== body) {
+      idempotencyRef.current = { body, key: createIdempotencyKey() };
+    }
+
     try {
-      const confirmation = await submitCheckout(
-        {
-          customer: { name: customer.name.trim(), email: customer.email.trim() },
-          items: cart.items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
-          expectedTotal: minorToMajor(cart.totals.totalMinor),
-        },
-        controller.signal,
-      );
+      const confirmation = await submitCheckout(request, {
+        signal: controller.signal,
+        idempotencyKey: idempotencyRef.current.key,
+      });
+      idempotencyRef.current = null;
       cart.clearCart();
       setStep({ name: 'confirmed', confirmation });
     } catch (error) {

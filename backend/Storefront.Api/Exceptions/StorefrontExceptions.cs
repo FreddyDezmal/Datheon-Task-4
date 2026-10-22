@@ -37,3 +37,7 @@ public sealed class PriceChangedException(decimal expectedTotal, PriceBreakdown 
     public decimal ExpectedTotal { get; } = expectedTotal;
     public PriceBreakdown Quote { get; } = quote;
 }
+
+/// <summary>An Idempotency-Key was reused for a different order, or by a different caller.</summary>
+public sealed class IdempotencyKeyReusedException()
+    : Exception("This Idempotency-Key was already used for a different order.");

@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Storefront.Api.Exceptions;
 using Storefront.Api.Middleware;
 using Storefront.Api.Models;
@@ -80,5 +82,57 @@ public class GlobalExceptionHandlerTests
 
         Assert.Equal(400, problem.Status);
         Assert.Equal("BAD_REQUEST", problem.Extensions["code"]);
+    }
+
+    [Fact]
+    public void Reused_idempotency_key_maps_to_422()
+    {
+        var problem = GlobalExceptionHandler.Map(new IdempotencyKeyReusedException());
+
+        Assert.Equal(422, problem.Status);
+        Assert.Equal("IDEMPOTENCY_KEY_REUSED", problem.Extensions["code"]);
+    }
+
+    [Fact]
+    public void Database_constraint_violations_map_to_409_without_sql_details()
+    {
+        var sqlite = new SqliteException("SQLite Error 19: 'UNIQUE constraint failed: Orders.Reference'.", 19, 2067);
+        var problem = GlobalExceptionHandler.Map(new DbUpdateException("An error occurred while saving.", sqlite));
+
+        Assert.Equal(409, problem.Status);
+        Assert.Equal("CONSTRAINT_CONFLICT", problem.Extensions["code"]);
+        Assert.DoesNotContain("Orders", problem.Title);
+        Assert.Null(problem.Detail);
+    }
+
+    [Fact]
+    public void A_busy_database_maps_to_503_so_clients_can_retry()
+    {
+        var problem = GlobalExceptionHandler.Map(
+            new DbUpdateException("save failed", new SqliteException("SQLite Error 5: 'database is locked'.", 5)));
+
+        Assert.Equal(503, problem.Status);
+        Assert.Equal("DATABASE_BUSY", problem.Extensions["code"]);
+    }
+
+    [Fact]
+    public void Other_database_failures_map_to_500_without_internals()
+    {
+        var problem = GlobalExceptionHandler.Map(
+            new SqliteException("SQLite Error 1: 'no such table: Orders'.", 1));
+
+        Assert.Equal(500, problem.Status);
+        Assert.Equal("DATABASE_ERROR", problem.Extensions["code"]);
+        Assert.DoesNotContain("table", problem.Title);
+        Assert.Null(problem.Detail);
+    }
+
+    [Fact]
+    public void Concurrency_conflicts_map_to_409()
+    {
+        var problem = GlobalExceptionHandler.Map(new DbUpdateConcurrencyException("row changed"));
+
+        Assert.Equal(409, problem.Status);
+        Assert.Equal("CONCURRENCY_CONFLICT", problem.Extensions["code"]);
     }
 }

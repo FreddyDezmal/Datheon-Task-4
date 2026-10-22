@@ -12,6 +12,12 @@ backend/**/TestResults/
 *.user
 .vs/
 
+# Local SQLite database (created by migrations; never committed)
+backend/**/App_Data/
+*.db
+*.db-shm
+*.db-wal
+
 # OS / editors
 .DS_Store
 .idea/

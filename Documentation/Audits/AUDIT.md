@@ -1,6 +1,6 @@
 # Storefront audit: 22 October 2026
 
-Scope: the code in `storefront.zip` as delivered. Every result below comes from a command run during this audit. The audit environment's outbound proxy refuses nuget.org and fakestoreapi.com, so any check that depends on either is marked **Blocked**.
+Scope: the code in `storefront.zip` as delivered. Every result below comes from a command run during this audit. The audit environment's outbound proxy refuses nuget.org and fakestoreapi.com, so any check that depends on either is marked **Blocked**. The blocked backend checks were later run on the project owner's Windows machine; see section 2a.
 
 ## 1. Executive summary
 
@@ -15,21 +15,25 @@ The audit found **six defects** and fixed all of them, each with a test:
 5. Invalid checkouts produced error responses larger than the request, and there was no checkout body limit.
 6. Under React StrictMode the "saved cart could not be read" notice was lost.
 
-**The highest-priority remaining work can't be done here:** run `dotnet restore`, `dotnet test` and the Swagger check on a machine that can reach nuget.org. Then run `tools/smoke_test.py` against live FakeStoreAPI. Until that happens, no backend test has run under real xUnit, and Swagger is unverified.
+**Update, 22 October 2026, 22:14:** on the project owner's Windows machine, the real `dotnet restore`, Release build, xUnit suite (106/106 passed) and Swagger checks have all passed (section 2a). The backend build-and-test gate is now passed.
+
+**Remaining work:**
+- Run `tools/smoke_test.py` against live FakeStoreAPI. All integration evidence so far comes from the mock.
+- The production-hardening items in section 4 are still open.
 
 ## 2. Verification matrix
 
 | # | Check | Command | Result | Limitation |
 |---|---|---|---|---|
 | 1 | Toolchain | `dotnet --list-sdks`, `--list-runtimes`; `node -v`; `npm -v` | SDK 10.0.401; runtimes Microsoft.NETCore.App and AspNetCore.App 10.0.12; Node 22.22.0; npm 10.9.4 | SDK installed from conda-forge (the dotnet.microsoft.com hosts are blocked) |
-| 2 | Package restore | `dotnet restore` (in `backend/`) | **Blocked**: `error NU1301: Unable to load the service index for source https://api.nuget.org/v3/index.json … status code '403'`. All alternative feeds probed (nuget.org CDN, dotnet-public on Azure DevOps, feedz.io, GitHub Packages) were also refused. | Proxy policy |
+| 2 | Package restore | `dotnet restore` (in `backend/`) | **Blocked**: `error NU1301: Unable to load the service index for source https://api.nuget.org/v3/index.json … status code '403'`. All alternative feeds probed (nuget.org CDN, dotnet-public on Azure DevOps, feedz.io, GitHub Packages) were also refused. | Proxy policy. **Passed later on Windows (2a)** |
 | 3 | Package versions exist | `git ls-remote --tags` on each upstream repo | Swashbuckle `v9.0.4` and `v10.3.1`, xunit `v2-2.9.3`, xunit.runner.visualstudio `3.1.0`, vstest `v17.13.0` all exist as tags | Not proof of availability on nuget.org |
 | 4 | Swashbuckle compatibility | Read `Directory.Build.props` and `README.md` at tags v9.0.4 and v10.3.1 | v9.0.4 builds `net9.0;net8.0` only and is listed for ASP.NET Core 8.0/9.0; v10.x adds `net10.0`. **Defect D1.** | — |
-| 5 | Build | `dotnet build` | **Blocked** by #2 | — |
-| 6 | Backend tests (real xUnit) | `dotnet test` | **Blocked** by #2. 0 tests discovered or run under xUnit. | — |
+| 5 | Build | `dotnet build` | **Blocked** by #2 | **Passed later on Windows (2a)** |
+| 6 | Backend tests (real xUnit) | `dotnet test` | **Blocked** by #2. 0 tests discovered or run under xUnit. | **106/106 passed later on Windows (2a)** |
 | 6a | Backend test source compiles; supplementary run | SDK 10.0.401 with a stand-in for the xUnit API and runner | Compiles with 0 warnings and 0 errors; 106/106 cases pass on the stand-in. Each new test was mutation-checked (it fails when its fix is reverted). | **Not** a substitute for #6 |
 | 7 | Production source compiles | SDK 10.0.401, stand-in for `AddSwaggerGen`/`UseSwagger`/`UseSwaggerUI` | 0 warnings, 0 errors (`TreatWarningsAsErrors` on) | Real Swashbuckle not compiled |
-| 8 | Swagger / OpenAPI | `GET /swagger/v1/swagger.json`, `/swagger/index.html` | **Blocked** (needs the package). Confirmed Swagger isn't mapped in Production (404). | — |
+| 8 | Swagger / OpenAPI | `GET /swagger/v1/swagger.json`, `/swagger/index.html` | **Blocked** (needs the package). Confirmed Swagger isn't mapped in Production (404). | **Passed later on Windows (2a)** |
 | 9 | API against the mock, baseline | `python3 tools/smoke_test.py --api … --mock …` | 43 passed, **2 failed** (missing `expectedTotal` accepted; 644 KiB body accepted with a 1.2 MB error response), 1 skipped (Swagger) | — |
 | 10 | API against the mock, after fixes | same | **45 passed, 0 failed**, 1 skipped (Swagger) | Mock data approximates live data |
 | 11 | Upstream failures | smoke test `--mock` | 500 → 502 `UPSTREAM_UNAVAILABLE`; HTML body → 502 `UPSTREAM_MALFORMED`; 15 s stall → 504 `UPSTREAM_TIMEOUT` after 10.0 s; checkout during outage → 502; recovers once healthy | — |
@@ -43,6 +47,22 @@ The audit found **six defects** and fixed all of them, each with a test:
 | 19 | Browser, production build | `vite preview` + Chromium | Corrupt-cart notice shown, so D6 is development-only | — |
 | 20 | Live FakeStoreAPI | — | **Not tested** (host unreachable) | Proxy policy |
 | 21 | Patch reproducibility | `git apply --check` on a fresh extract of the zip | Applies cleanly and reproduces the fixed tree exactly | — |
+
+## 2a. Follow-up verification on Windows
+
+The checks blocked in the audit environment (#2, #5, #6, #8) were run by the project owner on Windows after installing the .NET 10 SDK.
+
+| Check | Command | Result |
+|---|---|---|
+| Toolchain | `dotnet --version` | SDK 10.0.402 (the machine previously had only a 9.x SDK); tests ran on runtime 10.0.13 |
+| Package restore | `dotnet restore` (in `backend/`) | **Passed** in 3.5 s, including Swashbuckle.AspNetCore 10.3.1 |
+| Release build | `dotnet build -c Release` | **Passed**: `Storefront.Api` and `Storefront.Api.Tests` for `net10.0` |
+| Real xUnit suite | `dotnet test -c Release` | **Passed: 106 of 106**, 0 failed, 0 skipped, using the xUnit.net VSTest Adapter 3.1.0. This matches the 106 cases the stand-in runner counted. |
+| Swagger / OpenAPI | `GET /swagger/v1/swagger.json`, `/swagger/index.html` (Development) | **Passed**: HTTP 200 for both |
+
+These results are as reported from the owner's terminal. They are corroborated by the Release output in `backend/Storefront.Api.Tests/bin/Release/net10.0/`, which contains `xunit.core.dll`, `xunit.execution.dotnet.dll`, `xunit.runner.visualstudio.testadapter.dll`, `Swashbuckle.AspNetCore.*.dll` and `Microsoft.OpenApi.dll` from the restore.
+
+**Not yet run:** `tools/smoke_test.py` against live FakeStoreAPI.
 
 ## 3. Defects found
 
@@ -86,7 +106,7 @@ Also corrected: the README claimed backend "Met" results based on the stand-in r
 
 ## 5. Changes made
 
-All changes are in `Documentation/Audits/storefront-audit.patch` (apply from the project root with `git apply`); it applies cleanly to the original zip. The pre-fix versions of every modified file are kept in `Documentation/Audits/originals/`.
+All changes are in `Documentation/Audits/storefront-audit.patch` (apply from the project root with `git apply`); it applies cleanly to the original zip. Pre-fix copies of the modified files were kept temporarily in `Documentation/Audits/originals/` and removed after the Windows verification passed. To recover them, reverse-apply the patch (`git apply -R`). That backup also included a live copy of `Storefront.Api.csproj`, which editors picked up as a second project; future backups should rename project files or use an archive.
 
 | File | Change | Reason |
 |---|---|---|
@@ -132,14 +152,14 @@ python3 tools/smoke_test.py --api http://localhost:5080 --mock http://localhost:
 python3 tools/smoke_test.py --api http://localhost:5080
 ```
 
-Expected after restore: `dotnet test` discovers 106 test cases. That count comes from the stand-in run and should be confirmed. The smoke test should report 0 failed, with Swagger checked rather than skipped.
+Confirmed on Windows: `dotnet test` discovers and passes 106 test cases. Against live FakeStoreAPI, the smoke test should report 0 failed, with Swagger checked rather than skipped.
 
 ## 7. Remaining limitations
 
-**Environmental blockers (not code defects):**
+**Environmental blockers in the audit environment (not code defects):**
 
-- No NuGet access, so restore, build, `dotnet test`, Swagger and the Swashbuckle 10.3.1 upgrade are unverified.
-- No access to fakestoreapi.com, so live integration is untested.
+- No NuGet access. Since resolved: restore, build, `dotnet test` and Swagger, including the Swashbuckle 10.3.1 upgrade, passed on Windows (section 2a).
+- No access to fakestoreapi.com. Live integration is still untested.
 
 **Code-level limitations:** see the remaining risks in section 4 (idempotency, config fallback 409 loop, cache stampede, production hardening).
 
@@ -147,9 +167,9 @@ Expected after restore: `dotnet test` discovers 106 test cases. That count comes
 
 | Criterion | Status |
 |---|---|
-| Real `dotnet restore` | **Blocked** |
-| Real `dotnet test` (xUnit) | **Blocked** |
-| Swagger / OpenAPI available | **Blocked** |
+| Real `dotnet restore` | **Passed** (Windows, section 2a) |
+| Real `dotnet test` (xUnit) | **Passed**, 106/106 (Windows, section 2a) |
+| Swagger / OpenAPI available | **Passed** (Windows, section 2a) |
 | Live FakeStoreAPI integration | **Not tested** |
 | API endpoints against the mock | **Passed** |
 | Malformed, timeout and HTTP-failure upstreams | **Passed** (mock) |
@@ -164,4 +184,4 @@ Expected after restore: `dotnet test` discovers 106 test cases. That count comes
 | Quantity and removal behaviour consistent | **Passed** |
 | Drawer focus, Escape, keyboard | **Passed** |
 | Loading, empty, error, retry and confirmation states | **Passed** |
-| README accurate and reproducible | **Passed** for the frontend from a clean extract; the backend steps are blocked at restore here |
+| README accurate and reproducible | **Passed**: frontend from a clean extract; backend restore, build, test and Swagger on Windows |

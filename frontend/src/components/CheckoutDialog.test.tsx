@@ -22,7 +22,7 @@ const confirmation = {
   lines: [{ productId: 2, title: 'Mens Casual Slim Fit T-Shirt', unitPrice: 22.3, unitPriceMinor: 2230, quantity: 1, lineTotal: 22.3 }],
   totals: { subtotal: 22.3, tax: 1.78, shipping: 5.99, total: 30.07, currency: 'USD' },
   isSimulated: true,
-  notice: 'This is a simulated checkout. No payment was taken and the order has not been stored.',
+  notice: 'This is a demo checkout. No payment was taken. Your order has been saved.',
 };
 
 async function openCheckout() {
@@ -86,12 +86,14 @@ describe('checkout', () => {
     expect(window.localStorage.getItem(CART_STORAGE_KEY)).toBeNull();
   });
 
-  it('keeps the cart when the server is unreachable and lets the user retry', async () => {
+  it('keeps the cart when the server is unreachable and retries with the same idempotency key', async () => {
     seedCart();
     let attempts = 0;
+    const keys: (string | null)[] = [];
     mockApi({
-      checkout: () => {
+      checkout: (_url, init) => {
         attempts += 1;
+        keys.push(new Headers(init?.headers).get('Idempotency-Key'));
         if (attempts === 1) throw new TypeError('Failed to fetch');
         return jsonResponse(confirmation);
       },
@@ -107,6 +109,31 @@ describe('checkout', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
     expect(await screen.findByTestId('order-reference')).toBeInTheDocument();
     expect(attempts).toBe(2);
+    // The retry is the same order, so it must carry the same key: if the first request had in
+    // fact reached the server, the API returns that order instead of creating a second one.
+    expect(keys[0]).toMatch(/^[A-Za-z0-9_-]{8,100}$/);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('uses a new idempotency key when the order changes between attempts', async () => {
+    seedCart(2230, 1);
+    const keys: (string | null)[] = [];
+    mockApi({
+      checkout: (_url, init) => {
+        keys.push(new Headers(init?.headers).get('Idempotency-Key'));
+        throw new TypeError('Failed to fetch');
+      },
+    });
+    const { user, dialog } = await openCheckout();
+
+    await fillAndSubmit(user, dialog);
+    await within(dialog).findByRole('alert');
+    await user.clear(within(dialog).getByLabelText('Full name'));
+    await user.type(within(dialog).getByLabelText('Full name'), 'Grace Hopper');
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(keys).toHaveLength(2));
+
+    expect(keys[1]).not.toBe(keys[0]);
   });
 
   it('re-prices the cart from the server quote when prices changed, and asks the user to confirm', async () => {

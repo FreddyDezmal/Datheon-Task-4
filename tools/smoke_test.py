@@ -6,6 +6,9 @@ Exercises every endpoint, the checkout repricing rules, validation, CORS and Swa
 When pointed at tools/fakestore_mock.py (--mock) it also drives upstream failure modes.
 
 Usage
+  # This script sends a few hundred checkouts, far above the API's normal rate limits, so start
+  # the API with RateLimiting__CheckoutPermitLimit=10000 and RateLimiting__AccountPermitLimit=1000.
+
   # Against the offline stand-in (start the API with FakeStore__BaseUrl=http://localhost:9100/
   # and FakeStore__CatalogueCacheSeconds=0 so failure modes aren't hidden by the cache):
   python3 tools/smoke_test.py --api http://localhost:5080 --mock http://localhost:9100
@@ -30,6 +33,8 @@ TWO = Decimal("0.01")
 
 
 class Result:
+    rate_limited = False
+
     def __init__(self) -> None:
         self.passed = 0
         self.failed: list[str] = []
@@ -63,6 +68,8 @@ def request(method: str, url: str, body: object | None = None, headers: dict | N
             status, rh, payload = resp.status, resp.headers, resp.read()
     except urllib.error.HTTPError as err:
         status, rh, payload = err.code, err.headers, err.read()
+    if status == 429:
+        Result.rate_limited = True
     text = payload.decode("utf-8", "replace")
     try:
         parsed = json.loads(text) if text else None
@@ -229,6 +236,43 @@ def main() -> int:
     r.check("unknown product -> 422 PRODUCTS_UNAVAILABLE with ids",
             status == 422 and res.get("unavailableProductIds") == [987654], f"{status} {res}")
 
+    print("\n[idempotency]")
+    key = f"smoke-{random.Random().getrandbits(64):016x}"
+    one = {"customer": customer, "items": [{"productId": pid, "quantity": 1}], "expectedTotal": float(exp["total"])}
+    s1, h1, r1 = request("POST", f"{api}/api/checkout", one, headers={"Idempotency-Key": key})
+    s2, h2, r2 = request("POST", f"{api}/api/checkout", one, headers={"Idempotency-Key": key})
+    r.check("same Idempotency-Key twice -> same order, second marked Idempotent-Replayed",
+            s1 == 200 and s2 == 200 and r1.get("orderReference") == r2.get("orderReference")
+            and h2.get("Idempotent-Replayed") == "true" and h1.get("Idempotent-Replayed") is None, f"{s1} {s2}")
+    two = {**one, "items": [{"productId": pid, "quantity": 2}]}
+    s3, _, r3 = request("POST", f"{api}/api/checkout", two, headers={"Idempotency-Key": key})
+    r.check("same key, different order -> 422 IDEMPOTENCY_KEY_REUSED",
+            s3 == 422 and (r3 or {}).get("code") == "IDEMPOTENCY_KEY_REUSED", f"{s3} {r3}")
+
+    print("\n[accounts & orders]")
+    status, _, res = request("GET", f"{api}/api/orders")
+    r.check("GET /api/orders without a token -> 401 UNAUTHORIZED",
+            status == 401 and isinstance(res, dict) and res.get("code") == "UNAUTHORIZED", f"{status} {res}")
+    email, password = f"smoke-{random.Random().getrandbits(32):08x}@example.com", "Smoke!Test123"
+    status, _, res = request("POST", f"{api}/api/account/register", {"email": email, "password": password})
+    r.check("register a new account", status == 200, f"{status} {res}")
+    status, _, res = request("POST", f"{api}/api/account/register", {"email": "weak@example.com", "password": "short"})
+    r.check("weak password -> 400 VALIDATION_FAILED", status == 400 and res.get("code") == "VALIDATION_FAILED", f"{status} {res}")
+    status, _, res = request("POST", f"{api}/api/account/login", {"email": email, "password": "Wrong!Pass123"})
+    r.check("wrong password -> 401", status == 401, f"{status}")
+    status, _, token = request("POST", f"{api}/api/account/login", {"email": email, "password": password})
+    if r.check("login returns a bearer token", status == 200 and "accessToken" in (token or {}), f"{status} {token}"):
+        auth = {"Authorization": f"Bearer {token['accessToken']}"}
+        status, _, placed = request("POST", f"{api}/api/checkout", one, headers=auth)
+        status, _, mine = request("GET", f"{api}/api/orders", headers=auth)
+        r.check("signed-in checkout appears in GET /api/orders",
+                status == 200 and [o["orderReference"] for o in mine] == [placed.get("orderReference")], f"{status} {mine}")
+        status, _, detail = request("GET", f"{api}/api/orders/{placed.get('orderReference')}", headers=auth)
+        r.check("GET /api/orders/{reference} returns the stored order",
+                status == 200 and money(detail["totals"]["total"]) == exp["total"], f"{status} {detail}")
+        status, _, _ = request("GET", f"{api}/api/orders/{r1.get('orderReference')}", headers=auth)
+        r.check("someone else's (guest) order -> 404", status == 404, f"{status}")
+
     print("\n[CORS]")
     pre = {"Origin": args.origin, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"}
     status, h, _ = request("OPTIONS", f"{api}/api/checkout", headers=pre)
@@ -272,6 +316,9 @@ def main() -> int:
             request("GET", f"{mock}/__mode/ok")
 
     print(f"\n{r.passed} passed, {len(r.failed)} failed, {len(r.skipped)} skipped")
+    if Result.rate_limited:
+        print("  note: some requests got 429 TOO_MANY_REQUESTS. Restart the API with "
+              "RateLimiting__CheckoutPermitLimit=10000 and RateLimiting__AccountPermitLimit=1000 (see the docstring).")
     for name in r.failed:
         print(f"  failed: {name}")
     for s in r.skipped:
