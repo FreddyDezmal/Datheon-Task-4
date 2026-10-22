@@ -1,0 +1,80 @@
+/*
+ * Greenhaus design tokens.
+ * Palette: a department-store bottle green on a cool sage-grey ground, with brass reserved
+ * for merchandising badges. Category plates tint each product image by department.
+ */
+:root {
+  /* Colour */
+  --color-ground: #eef2ef;
+  --color-surface: #ffffff;
+  --color-ink: #16201b;
+  --color-ink-muted: #56625b;
+  --color-line: #d4ddd7;
+  --color-line-strong: #b7c4bb;
+
+  --color-accent: #1d5442;
+  --color-accent-hover: #143d30;
+  --color-accent-soft: #dfebe4;
+  --color-on-accent: #ffffff;
+
+  --color-brass: #7d5a17;
+  --color-brass-soft: #f3e7cb;
+
+  --color-danger: #9f2b2b;
+  --color-danger-soft: #f8e7e5;
+  --color-info-soft: #e5edf5;
+  --color-info: #26476b;
+
+  --plate-default: #e7ece9;
+  --plate-electronics: #e3e9ef;
+  --plate-jewelry: #f3ecdd;
+  --plate-clothing: #e6ede7;
+
+  --color-focus: #2b6cb0;
+  --color-backdrop: rgb(16 26 21 / 0.45);
+
+  /* Type */
+  --font-display: 'Bricolage Grotesque', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'Public Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-md: 1.125rem;
+  --text-lg: 1.375rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.375rem;
+
+  /* Space (4px base) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* Shape: small radius for controls, larger for containers, full for chips */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgb(22 32 27 / 0.06);
+  --shadow-card-hover: 0 8px 24px -12px rgb(22 32 27 / 0.28);
+  --shadow-panel: -12px 0 40px -16px rgb(22 32 27 / 0.35);
+
+  --duration-fast: 120ms;
+  --duration-base: 220ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --header-height: 4rem;
+  --content-width: 76rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+  }
+}

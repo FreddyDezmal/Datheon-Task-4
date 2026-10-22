@@ -1,0 +1,55 @@
+# Example requests (VS Code REST Client, Visual Studio or Rider HTTP client).
+@api = http://localhost:5080
+
+### All products
+GET {{api}}/api/products
+
+### Search + category group + sort
+GET {{api}}/api/products?search=jacket&category=clothing&sort=price-asc
+
+### Price range
+GET {{api}}/api/products?minPrice=10&maxPrice=60&sort=rating
+
+### One product
+GET {{api}}/api/products/5
+
+### Unknown product -> 404
+GET {{api}}/api/products/999
+
+### Normalised categories
+GET {{api}}/api/categories
+
+### Pricing rules used by the cart
+GET {{api}}/api/store/config
+
+### Successful simulated checkout
+POST {{api}}/api/checkout
+Content-Type: application/json
+
+{
+  "customer": { "name": "Ada Lovelace", "email": "ada@example.com" },
+  "items": [
+    { "productId": 2, "quantity": 2 },
+    { "productId": 19, "quantity": 1 }
+  ],
+  "expectedTotal": 56.75
+}
+
+### Stale total -> 409 with a fresh quote
+POST {{api}}/api/checkout
+Content-Type: application/json
+
+{
+  "customer": { "name": "Ada Lovelace", "email": "ada@example.com" },
+  "items": [ { "productId": 2, "quantity": 1 } ],
+  "expectedTotal": 1.00
+}
+
+### Invalid request -> 400 with field errors
+POST {{api}}/api/checkout
+Content-Type: application/json
+
+{
+  "customer": { "name": "A", "email": "not-an-email" },
+  "items": [ { "productId": 2, "quantity": 0 } ]
+}
