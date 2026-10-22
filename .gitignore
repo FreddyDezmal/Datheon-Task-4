@@ -17,3 +17,6 @@ backend/**/TestResults/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Lazy
+ClaudeOutputs/
