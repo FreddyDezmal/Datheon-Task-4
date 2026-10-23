@@ -7,6 +7,8 @@ export const NAME_MAX_LENGTH = 100;
 export const EMAIL_MAX_LENGTH = 254;
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
+export const isValidEmail = (email: string) => email.length <= EMAIL_MAX_LENGTH && EMAIL_PATTERN.test(email);
+
 export type CustomerErrors = Partial<Record<keyof CustomerDetails, string>>;
 
 export function validateCustomer(customer: CustomerDetails): CustomerErrors {
@@ -22,7 +24,7 @@ export function validateCustomer(customer: CustomerDetails): CustomerErrors {
 
   if (email.length === 0) {
     errors.email = 'Enter your email address.';
-  } else if (email.length > EMAIL_MAX_LENGTH || !EMAIL_PATTERN.test(email)) {
+  } else if (!isValidEmail(email)) {
     errors.email = 'Enter an email address like name@example.com.';
   }
 

@@ -67,6 +67,21 @@ public sealed class AuthorizationTests : IDisposable
     }
 
     [Fact]
+    public async Task Checkout_with_an_invalid_bearer_token_is_rejected_instead_of_becoming_a_guest_order()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "expired-or-forged");
+
+        var response = await client.PostAsJsonAsync("/api/checkout", Order((2, 1)));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal("UNAUTHORIZED", (await ReadJson(response)).GetProperty("code").GetString());
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<Storefront.Api.Data.StorefrontDbContext>();
+        Assert.Empty(db.Orders);
+    }
+
+    [Fact]
     public async Task Signed_in_checkout_appears_in_my_orders()
     {
         var ada = await _factory.CreateSignedInClientAsync("ada@example.com");

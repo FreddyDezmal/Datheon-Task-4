@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { useCart } from '../context/CartContext';
 import { usePricingRules } from '../context/StoreConfigContext';
 import { useToast } from '../context/ToastContext';
@@ -8,11 +8,22 @@ import { CheckIcon, PlusIcon, StarIcon } from './Icons';
 
 interface ProductCardProps {
   product: Product;
+  onOpenDetails: (product: Product) => void;
 }
+
+/** A real link (so it can be opened in a new tab or shared) that opens the details view in place. */
+export const productDetailsHref = (id: number) => {
+  const params = new URLSearchParams(window.location.search);
+  params.set('product', String(id));
+  return `?${params.toString()}`;
+};
+
+const opensInPlace = (event: MouseEvent) =>
+  event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 
 const FEEDBACK_MS = 1400;
 
-export const ProductCard = memo(function ProductCard({ product }: ProductCardProps) {
+export const ProductCard = memo(function ProductCard({ product, onOpenDetails }: ProductCardProps) {
   const { addToCart, getQuantity } = useCart();
   const { currency, locale } = usePricingRules();
   const { notify } = useToast();
@@ -35,9 +46,17 @@ export const ProductCard = memo(function ProductCard({ product }: ProductCardPro
     timer.current = setTimeout(() => setJustAdded(false), FEEDBACK_MS);
   };
 
+  const href = productDetailsHref(product.id);
+  const openDetails = (event: MouseEvent) => {
+    if (!opensInPlace(event)) return;
+    event.preventDefault();
+    onOpenDetails(product);
+  };
+
   return (
     <article className="product-card" data-category={product.categoryGroup ?? product.category} aria-labelledby={`product-${product.id}-title`}>
-      <div className="product-card__media">
+      {/* Duplicate of the title link for mouse and touch; hidden from keyboard and screen readers. */}
+      <a className="product-card__media" href={href} onClick={openDetails} tabIndex={-1} aria-hidden="true">
         {imageFailed || !product.image ? (
           <div className="product-card__image-fallback" aria-hidden="true">
             {product.categoryName}
@@ -53,13 +72,15 @@ export const ProductCard = memo(function ProductCard({ product }: ProductCardPro
           />
         )}
         {product.badge && <span className={`badge badge--${product.badge.code}`}>{product.badge.label}</span>}
-      </div>
+      </a>
 
       <div className="product-card__body">
         <p className="product-card__category">{product.categoryName}</p>
-        <h3 className="product-card__title" id={`product-${product.id}-title`} title={product.title}>
-          {product.title}
-        </h3>
+        <h2 className="product-card__title" id={`product-${product.id}-title`} title={product.title}>
+          <a className="product-card__link" href={href} onClick={openDetails}>
+            {product.title}
+          </a>
+        </h2>
         {product.rating && (
           <p className="product-card__rating">
             <StarIcon width={14} height={14} className="product-card__star" />

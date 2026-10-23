@@ -34,6 +34,7 @@
   top: 0;
   right: 0;
   bottom: 0;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   display: flex;
   flex-direction: column;
   width: min(28rem, 100vw);
@@ -200,8 +201,8 @@
 .stepper__button {
   display: grid;
   place-items: center;
-  width: 2.25rem;
-  height: 2.25rem;
+  width: 2.5rem;
+  height: 2.5rem;
   border: 0;
   border-radius: 50%;
   background: transparent;

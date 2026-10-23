@@ -11,6 +11,7 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--color-ground);
   color: var(--color-ink);
   font-family: var(--font-body);
@@ -47,6 +48,11 @@ input,
 select {
   font: inherit;
   color: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation; /* no double-tap zoom delay on buttons */
 }
 
 button {
@@ -112,6 +118,10 @@ button {
   opacity: 0.55;
 }
 
+.button:active:not(:disabled) {
+  translate: 0 1px;
+}
+
 .button--primary {
   background: var(--color-accent);
   color: var(--color-on-accent);
@@ -162,6 +172,7 @@ button {
 }
 
 .link-button {
+  min-height: 2rem;
   padding: var(--space-1) 0;
   border: 0;
   background: none;
@@ -173,6 +184,19 @@ button {
 
 .link-button:hover {
   color: var(--color-danger);
+}
+
+/* Inline text actions ("Sign in", "Go to sign in"): links, not destructive. */
+.link-button--accent {
+  min-height: 0;
+  padding: 0;
+  color: var(--color-accent);
+  font-size: inherit;
+  font-weight: 600;
+}
+
+.link-button--accent:hover {
+  color: var(--color-accent-hover);
 }
 
 .spinner {
@@ -225,7 +249,7 @@ button {
 .toast-region {
   position: fixed;
   z-index: 60;
-  bottom: var(--space-4);
+  bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
   left: 50%;
   translate: -50% 0;
   display: grid;
@@ -245,7 +269,8 @@ button {
   color: #fff;
   font-size: var(--text-sm);
   box-shadow: 0 10px 30px -12px rgb(0 0 0 / 0.5);
-  pointer-events: auto;
+  /* Taps go through to whatever is underneath; only the close button is interactive. */
+  pointer-events: none;
   animation: toast-in var(--duration-base) var(--ease-out);
 }
 
@@ -258,12 +283,29 @@ button {
 }
 
 .toast__close {
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 2.25rem;
+  height: 2.25rem;
+  margin: calc(-1 * var(--space-2)) 0;
   border: 0;
+  border-radius: var(--radius-sm);
   background: none;
   color: inherit;
   font-size: 1.25rem;
   line-height: 1;
-  opacity: 0.75;
+  opacity: 0.8;
+}
+
+.toast__close:hover {
+  opacity: 1;
+  background: rgb(255 255 255 / 0.12);
+}
+
+.toast__close:focus-visible {
+  outline-color: #9cc3f0;
 }
 
 @keyframes toast-in {

@@ -12,10 +12,13 @@ interface Toast {
 interface ToastContextValue {
   /** A toast with the same `key` replaces the previous one instead of stacking. */
   notify: (message: string, tone?: ToastTone, key?: string) => void;
+  /** Removes toasts with this key, e.g. "added to cart" once the cart itself is open. */
+  dismissKey: (key: string) => void;
 }
 
-const ToastContext = createContext<ToastContextValue>({ notify: () => {} });
-const TOAST_DURATION_MS = 3500;
+const ToastContext = createContext<ToastContextValue>({ notify: () => {}, dismissKey: () => {} });
+/** Errors stay longer: they usually need reading, not just noticing. */
+const TOAST_DURATION_MS: Record<ToastTone, number> = { success: 4000, info: 5000, error: 7000 };
 const MAX_TOASTS = 3;
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -36,8 +39,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         const kept = key ? current.filter((t) => t.key !== key) : current;
         return [...kept.slice(-(MAX_TOASTS - 1)), { id, message, tone, key }];
       });
-      timers.current.set(id, setTimeout(() => dismiss(id), TOAST_DURATION_MS));
+      timers.current.set(id, setTimeout(() => dismiss(id), TOAST_DURATION_MS[tone]));
     },
+    [dismiss],
+  );
+
+  const toastsRef = useRef(toasts);
+  toastsRef.current = toasts;
+  const dismissKey = useCallback(
+    (key: string) => toastsRef.current.filter((t) => t.key === key).forEach((t) => dismiss(t.id)),
     [dismiss],
   );
 
@@ -46,7 +56,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return () => pending.forEach(clearTimeout);
   }, []);
 
-  const value = useMemo(() => ({ notify }), [notify]);
+  const value = useMemo(() => ({ notify, dismissKey }), [notify, dismissKey]);
 
   return (
     <ToastContext.Provider value={value}>
@@ -56,7 +66,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           <div key={toast.id} className={`toast toast--${toast.tone}`}>
             <span>{toast.message}</span>
             <button type="button" className="toast__close" onClick={() => dismiss(toast.id)} aria-label="Dismiss notification">
-              ×
+              <span aria-hidden="true">×</span>
             </button>
           </div>
         ))}

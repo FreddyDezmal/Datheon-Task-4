@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useCart } from '../context/CartContext';
+import { useSession } from '../context/SessionContext';
 import { usePricingRules } from '../context/StoreConfigContext';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 import { ApiError } from '../services/apiClient';
-import { createIdempotencyKey, submitCheckout } from '../services/checkoutService';
+import { createIdempotencyKey, submitCheckout, type CheckoutResult } from '../services/checkoutService';
 import { parseOrderQuote } from '../services/responseParsers';
 import type { CheckoutConfirmation, CustomerDetails } from '../types/checkout';
 import { validateCustomer, type CustomerErrors } from '../utils/checkoutValidation';
@@ -15,22 +16,38 @@ import { OrderConfirmation } from './OrderConfirmation';
 interface CheckoutDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Opens the sign-in dialog; checkout reopens afterwards with the details still filled in. */
+  onSignIn: () => void;
 }
 
 export type CheckoutProblem =
   | { kind: 'price-changed'; message: string }
   | { kind: 'unavailable'; message: string; productIds: number[] }
   | { kind: 'retryable'; message: string }
+  /** The request may have reached the server: only a retry with the same idempotency key is safe. */
+  | { kind: 'uncertain'; message: string }
+  | { kind: 'session-expired'; message: string }
   | { kind: 'other'; message: string };
 
-type Step = { name: 'details' } | { name: 'submitting' } | { name: 'confirmed'; confirmation: CheckoutConfirmation };
+type Step =
+  | { name: 'details' }
+  | { name: 'submitting' }
+  | { name: 'confirmed'; confirmation: CheckoutConfirmation; replayed: boolean; savedToAccount: boolean };
+
+/** Failures after which the order might nevertheless have been saved. */
+const isUncertainOutcome = (error: ApiError) =>
+  error.code === 'NETWORK_ERROR' ||
+  error.code === 'TIMEOUT' ||
+  error.code === 'INVALID_RESPONSE' ||
+  (error.status >= 500 && !error.code.startsWith('UPSTREAM_') && error.code !== 'DATABASE_BUSY');
 
 /**
  * Checkout flow: details → submitting → confirmed.
  * The cart is only cleared after the server confirms the order; every failure keeps it intact.
  */
-export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
+export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProps) {
   const cart = useCart();
+  const session = useSession();
   const { currency, locale } = usePricingRules();
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -41,6 +58,8 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
   const [fieldErrors, setFieldErrors] = useState<CustomerErrors>({});
   const [problem, setProblem] = useState<CheckoutProblem | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Guards against a second submit landing before React re-renders the disabled button.
+  const inFlightRef = useRef(false);
   // One key per distinct order: a retry of the same request reuses it, any change gets a new one.
   const idempotencyRef = useRef<{ body: string; key: string } | null>(null);
 
@@ -48,12 +67,21 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
   useEffect(() => {
     if (isOpen) {
       setStep({ name: 'details' });
-      setProblem(null);
       setFieldErrors({});
+      // Keep a session-expired notice if the shopper went to sign in and came back; clear the rest.
+      setProblem((current) => (current?.kind === 'session-expired' && session.status !== 'signed-in' ? current : null));
     } else {
       abortRef.current?.abort();
     }
+    // Only react to opening and closing, not to session changes while open.
   }, [isOpen]);
+
+  // Signed-in shoppers start with their account email; anything they type takes precedence.
+  useEffect(() => {
+    if (isOpen && session.status === 'signed-in' && session.email) {
+      setCustomer((current) => (current.email.trim() === '' ? { ...current, email: session.email ?? '' } : current));
+    }
+  }, [isOpen, session.status, session.email]);
 
   const isSubmitting = step.name === 'submitting';
   const close = () => {
@@ -62,6 +90,7 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
   useModalBehavior(isOpen, close, panelRef, nameInputRef);
 
   const submit = async () => {
+    if (inFlightRef.current) return;
     const errors = validateCustomer(customer);
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) return;
@@ -72,6 +101,7 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
 
     setProblem(null);
     setStep({ name: 'submitting' });
+    inFlightRef.current = true;
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -85,18 +115,24 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
       idempotencyRef.current = { body, key: createIdempotencyKey() };
     }
 
+    const idempotencyKey = idempotencyRef.current.key;
+    const send = (accessToken?: string) =>
+      submitCheckout(request, { signal: controller.signal, idempotencyKey, ...(accessToken ? { accessToken } : {}) });
+
     try {
-      const confirmation = await submitCheckout(request, {
-        signal: controller.signal,
-        idempotencyKey: idempotencyRef.current.key,
-      });
+      // Signed in: the order is saved to the account. An expired token is refreshed and the same
+      // request (same idempotency key) is sent once more; the API rejects a stale token before saving.
+      const asAccount = session.status !== 'anonymous';
+      const result: CheckoutResult = asAccount ? await session.withAccessToken((token) => send(token)) : await send();
       idempotencyRef.current = null;
       cart.clearCart();
-      setStep({ name: 'confirmed', confirmation });
+      setStep({ name: 'confirmed', confirmation: result.confirmation, replayed: result.replayed, savedToAccount: asAccount });
     } catch (error) {
       if (controller.signal.aborted) return;
       setStep({ name: 'details' });
       handleFailure(error);
+    } finally {
+      inFlightRef.current = false;
     }
   };
 
@@ -106,7 +142,34 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
       return;
     }
 
+    if (isUncertainOutcome(error)) {
+      setProblem({
+        kind: 'uncertain',
+        message:
+          "We couldn't confirm whether your order went through. Your cart is saved. Select Try again: if the order was placed, you'll see it instead of a second order being created.",
+      });
+      return;
+    }
+
     switch (error.code) {
+      case 'SESSION_EXPIRED':
+        setProblem({
+          kind: 'session-expired',
+          message: "Your session expired, so this order hasn't been placed. Sign in again to save it to your account, or place it as a guest.",
+        });
+        return;
+      case 'IDEMPOTENCY_KEY_REUSED':
+        // The earlier attempt with this key reached the store with different details or as a
+        // different shopper. Start a new key, but tell the shopper first so they don't order twice.
+        idempotencyRef.current = null;
+        setProblem({
+          kind: 'other',
+          message:
+            session.status === 'signed-in'
+              ? 'An earlier attempt at this order may already have been placed. Check Your account → Orders before placing it again.'
+              : 'An earlier attempt at this order may already have been placed. Check before placing it again.',
+        });
+        return;
       case 'PRICE_CHANGED': {
         try {
           const quote = parseOrderQuote(error.problem?.quote);
@@ -148,7 +211,7 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
       default:
         setProblem(
           error.isRetryable
-            ? { kind: 'retryable', message: `${error.message} Your cart is saved, so you can try again.` }
+            ? { kind: 'retryable', message: `${error.message} Your cart is saved.` }
             : { kind: 'other', message: error.message },
         );
     }
@@ -183,7 +246,13 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
         </header>
 
         {step.name === 'confirmed' ? (
-          <OrderConfirmation confirmation={step.confirmation} locale={locale} onDone={onClose} />
+          <OrderConfirmation
+            confirmation={step.confirmation}
+            replayed={step.replayed}
+            savedToAccount={step.savedToAccount}
+            locale={locale}
+            onDone={onClose}
+          />
         ) : (
           <CheckoutForm
             nameInputRef={nameInputRef}
@@ -198,6 +267,8 @@ export function CheckoutDialog({ isOpen, onClose }: CheckoutDialogProps) {
               }));
             }}
             fieldErrors={fieldErrors}
+            accountEmail={session.status === 'signed-in' ? session.email : null}
+            onSignIn={onSignIn}
             problem={problem}
             isSubmitting={isSubmitting}
             onSubmit={submit}

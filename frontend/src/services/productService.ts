@@ -1,7 +1,7 @@
-import type { CatalogQuery, Category, ProductList } from '../types/product';
+import type { CatalogQuery, Category, Product, ProductList } from '../types/product';
 import type { PricingRules } from '../types/store';
 import { apiRequest } from './apiClient';
-import { parseCategories, parseProductList, parseStoreConfig } from './responseParsers';
+import { parseCategories, parseProduct, parseProductList, parseStoreConfig } from './responseParsers';
 
 export function buildProductQueryString(query: CatalogQuery): string {
   const params = new URLSearchParams();
@@ -15,6 +15,11 @@ export function buildProductQueryString(query: CatalogQuery): string {
 
 export function fetchProducts(query: CatalogQuery, signal?: AbortSignal): Promise<ProductList> {
   return apiRequest(`/api/products${buildProductQueryString(query)}`, parseProductList, signal ? { signal } : {});
+}
+
+/** 404 NOT_FOUND when the product doesn't exist (or is no longer in the catalogue). */
+export function fetchProduct(id: number, signal?: AbortSignal): Promise<Product> {
+  return apiRequest(`/api/products/${id}`, parseProduct, signal ? { signal } : {});
 }
 
 export function fetchCategories(signal?: AbortSignal): Promise<Category[]> {

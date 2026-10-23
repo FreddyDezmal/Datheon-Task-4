@@ -2,7 +2,7 @@ import { ProductCard, ProductCardSkeleton } from '../components/ProductCard';
 import { SortSelect } from '../components/SortSelect';
 import { StatusMessage } from '../components/StatusMessage';
 import { useProducts } from '../hooks/useProducts';
-import type { CatalogQuery, Category, SortOption } from '../types/product';
+import type { CatalogQuery, Category, Product, SortOption } from '../types/product';
 
 interface CatalogPageProps {
   /** Query used for fetching (search already debounced). */
@@ -10,11 +10,12 @@ interface CatalogPageProps {
   categories: readonly Category[];
   onSortChange: (sort: SortOption) => void;
   onResetFilters: () => void;
+  onOpenProduct: (product: Product) => void;
 }
 
 const SKELETON_COUNT = 8;
 
-export function CatalogPage({ query, categories, onSortChange, onResetFilters }: CatalogPageProps) {
+export function CatalogPage({ query, categories, onSortChange, onResetFilters, onOpenProduct }: CatalogPageProps) {
   const { status, products, error, retry } = useProducts(query);
 
   const categoryName =
@@ -78,7 +79,7 @@ export function CatalogPage({ query, categories, onSortChange, onResetFilters }:
         )}
         <div className={`product-grid${status === 'loading' ? ' is-refreshing' : ''}`}>
           {products.map((product) => (
-            <ProductCard key={product.id} product={product} />
+            <ProductCard key={product.id} product={product} onOpenDetails={onOpenProduct} />
           ))}
         </div>
       </>

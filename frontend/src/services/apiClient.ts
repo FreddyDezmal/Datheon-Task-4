@@ -22,19 +22,33 @@ export type ApiErrorCode =
   | 'UPSTREAM_UNAVAILABLE'
   | 'UPSTREAM_TIMEOUT'
   | 'UPSTREAM_MALFORMED'
+  | 'UNAUTHORIZED'
+  | 'SESSION_EXPIRED'
+  | 'TOO_MANY_REQUESTS'
+  | 'IDEMPOTENCY_KEY_REUSED'
+  | 'DATABASE_BUSY'
   | (string & {});
 
 export class ApiError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode;
   readonly problem: ProblemDetails | null;
+  /** From the Retry-After header (429 and some 503 responses), when the server sent one. */
+  readonly retryAfterSeconds: number | null;
 
-  constructor(message: string, status: number, code: ApiErrorCode, problem: ProblemDetails | null = null) {
+  constructor(
+    message: string,
+    status: number,
+    code: ApiErrorCode,
+    problem: ProblemDetails | null = null,
+    retryAfterSeconds: number | null = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.problem = problem;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 
   /** True when retrying the same request might succeed. */
@@ -52,6 +66,8 @@ interface RequestOptions {
   signal?: AbortSignal;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  /** Called with a successful response before it is parsed, e.g. to read a response header. */
+  onResponse?: (response: Response) => void;
 }
 
 /**
@@ -61,7 +77,7 @@ interface RequestOptions {
 export async function apiRequest<T>(
   path: string,
   parse: (data: unknown) => T,
-  { method = 'GET', body, signal, headers, timeoutMs = REQUEST_TIMEOUT_MS }: RequestOptions = {},
+  { method = 'GET', body, signal, headers, timeoutMs = REQUEST_TIMEOUT_MS, onResponse }: RequestOptions = {},
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -99,19 +115,48 @@ export async function apiRequest<T>(
 
   if (!response.ok) {
     const problem = isProblemDetails(data) ? data : null;
+    const retryAfter = parseRetryAfter(response.headers.get('Retry-After'));
     throw new ApiError(
-      [problem?.title, problem?.detail].filter(Boolean).join(' ') || `Request failed with status ${response.status}.`,
+      describeFailure(response.status, problem, retryAfter),
       response.status,
       problem?.code ?? `HTTP_${response.status}`,
       problem,
+      retryAfter,
     );
   }
 
+  onResponse?.(response);
   try {
     return parse(data);
   } catch {
     throw new ApiError('The store sent an unexpected response.', response.status, 'INVALID_RESPONSE');
   }
+}
+
+/**
+ * A message that is safe to show. The API's problem titles are written for users and never contain
+ * internals, so they are used as-is; statuses that need a specific next step get their own wording.
+ */
+function describeFailure(status: number, problem: ProblemDetails | null, retryAfterSeconds: number | null): string {
+  if (status === 429) {
+    return retryAfterSeconds
+      ? `Too many requests. Wait ${retryAfterSeconds} ${retryAfterSeconds === 1 ? 'second' : 'seconds'} and try again.`
+      : 'Too many requests. Wait a moment and try again.';
+  }
+  if (status === 413) return 'That request was too large for the store to accept.';
+  const text = [problem?.title, problem?.detail].filter(Boolean).join(' ');
+  if (text) return text;
+  if (status >= 500) return 'The store is having a problem right now. Try again in a moment.';
+  return `Request failed with status ${status}.`;
+}
+
+/** Retry-After is either delta-seconds or an HTTP date. */
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? null : Math.max(0, Math.ceil((date - Date.now()) / 1000));
 }
 
 async function readJson(response: Response): Promise<unknown> {

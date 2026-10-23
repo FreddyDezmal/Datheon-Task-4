@@ -2,7 +2,18 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { AppProviders, Storefront } from '../App';
-import { jsonResponse, mockApi, pricingRules } from '../test/fixtures';
+import {
+  accountRoutes,
+  authHeader,
+  callsTo,
+  issueTokens,
+  jsonResponse,
+  mockApi,
+  pricingRules,
+  problem,
+  seedSession,
+  unauthorized,
+} from '../test/fixtures';
 import { CART_STORAGE_KEY } from '../utils/cartStorage';
 
 const seedCart = (unitPriceMinor = 2230, quantity = 1) =>
@@ -173,5 +184,197 @@ describe('checkout', () => {
 
     await user.click(within(dialog).getByRole('button', { name: 'Remove unavailable items' }));
     expect(badge()).not.toBeInTheDocument();
+  });
+
+  it('prevents a double submit from placing two orders', async () => {
+    seedCart();
+    let release: () => void = () => {};
+    const fetchMock = mockApi({
+      checkout: () => new Promise((resolve) => (release = () => resolve(jsonResponse(confirmation)))),
+    });
+    const { user, dialog } = await openCheckout();
+    await user.type(within(dialog).getByLabelText('Full name'), 'Ada Lovelace');
+    await user.type(within(dialog).getByLabelText('Email'), 'ada@example.com');
+
+    const submit = within(dialog).getByRole('button', { name: 'Place demo order' });
+    await user.click(submit);
+    await user.keyboard('{Enter}');
+    expect(within(dialog).getByRole('button', { name: /Placing order/ })).toBeDisabled();
+    release();
+
+    expect(await screen.findByTestId('order-reference')).toBeInTheDocument();
+    expect(callsTo(fetchMock, '/api/checkout')).toHaveLength(1);
+  });
+
+  it('treats a lost response as an uncertain outcome and shows the order the retry recovered', async () => {
+    seedCart();
+    let attempts = 0;
+    mockApi({
+      checkout: () => {
+        attempts += 1;
+        if (attempts === 1) return problem(500, 'DATABASE_ERROR', { title: 'The order could not be saved.' });
+        return new Response(JSON.stringify(confirmation), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', 'Idempotent-Replayed': 'true' },
+        });
+      },
+    });
+    const { user, dialog } = await openCheckout();
+    await fillAndSubmit(user, dialog);
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent("couldn't confirm whether your order went through");
+    expect(badge()).toHaveTextContent('1');
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByTestId('confirmation-replayed')).toHaveTextContent('not placed a second time');
+    expect(screen.getByTestId('confirmation-where')).toHaveTextContent('guest');
+  });
+
+  it('tells the shopper how long to wait when checkout is rate limited, and keeps the cart', async () => {
+    seedCart();
+    mockApi({
+      checkout: () =>
+        new Response(JSON.stringify({ status: 429, title: 'Too Many Requests', code: 'TOO_MANY_REQUESTS' }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/problem+json', 'Retry-After': '12' },
+        }),
+    });
+    const { user, dialog } = await openCheckout();
+    await fillAndSubmit(user, dialog);
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Wait 12 seconds and try again. Your cart is saved.');
+    expect(within(dialog).getByRole('button', { name: 'Try again' })).toBeEnabled();
+    expect(badge()).toHaveTextContent('1');
+  });
+
+  it('warns about a possible earlier order when the server reports the key was reused, then starts a new key', async () => {
+    seedCart();
+    const keys: (string | null)[] = [];
+    mockApi({
+      checkout: (_url, init) => {
+        keys.push(new Headers(init?.headers).get('Idempotency-Key'));
+        return keys.length === 1
+          ? problem(422, 'IDEMPOTENCY_KEY_REUSED', { title: 'This Idempotency-Key was already used for a different order.' })
+          : jsonResponse(confirmation);
+      },
+    });
+    const { user, dialog } = await openCheckout();
+    await fillAndSubmit(user, dialog);
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('may already have been placed');
+    await user.click(within(dialog).getByRole('button', { name: 'Place demo order' }));
+    expect(await screen.findByTestId('order-reference')).toBeInTheDocument();
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it('reports a request the server refuses as too large', async () => {
+    seedCart();
+    mockApi({ checkout: () => problem(413, 'REQUEST_TOO_LARGE', { title: 'Payload Too Large' }) });
+    const { user, dialog } = await openCheckout();
+    await fillAndSubmit(user, dialog);
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('too large');
+    expect(badge()).toHaveTextContent('1');
+  });
+});
+
+describe('checkout with an account', () => {
+  it('sends the bearer token, prefills the account email and says the order is saved to the account', async () => {
+    seedCart();
+    seedSession('ada@example.com');
+    const fetchMock = mockApi({ routes: accountRoutes(), checkout: () => jsonResponse(confirmation) });
+    const { user, dialog } = await openCheckout();
+
+    await waitFor(() => expect(within(dialog).getByLabelText('Email')).toHaveValue('ada@example.com'));
+    expect(within(dialog).getByTestId('checkout-account')).toHaveTextContent('Signed in as ada@example.com');
+    await user.type(within(dialog).getByLabelText('Full name'), 'Ada Lovelace');
+    await user.click(within(dialog).getByRole('button', { name: 'Place demo order' }));
+
+    expect(await screen.findByTestId('confirmation-where')).toHaveTextContent('saved to your account');
+    expect(authHeader(callsTo(fetchMock, '/api/checkout')[0]?.[1])).toMatch(/^Bearer access-\d+$/);
+  });
+
+  it('checks out as a guest with no Authorization header', async () => {
+    seedCart();
+    const fetchMock = mockApi({ checkout: () => jsonResponse(confirmation) });
+    const { user, dialog } = await openCheckout();
+    expect(within(dialog).getByTestId('checkout-account')).toHaveTextContent('Checking out as a guest');
+    await fillAndSubmit(user, dialog);
+
+    await screen.findByTestId('order-reference');
+    expect(authHeader(callsTo(fetchMock, '/api/checkout')[0]?.[1])).toBeNull();
+  });
+
+  it('renews an expired token and resends the same order with the same key', async () => {
+    seedCart();
+    seedSession();
+    const sent: { auth: string | null; key: string | null }[] = [];
+    const fetchMock = mockApi({
+      routes: accountRoutes(),
+      checkout: (_url, init) => {
+        const headers = new Headers(init?.headers);
+        sent.push({ auth: headers.get('Authorization'), key: headers.get('Idempotency-Key') });
+        return sent.length === 1 ? unauthorized() : jsonResponse(confirmation);
+      },
+    });
+    const { user, dialog } = await openCheckout();
+    await user.type(within(dialog).getByLabelText('Full name'), 'Ada Lovelace');
+    await waitFor(() => expect(within(dialog).getByLabelText('Email')).toHaveValue('ada@example.com'));
+    await user.click(within(dialog).getByRole('button', { name: 'Place demo order' }));
+
+    expect(await screen.findByTestId('confirmation-where')).toHaveTextContent('saved to your account');
+    expect(sent).toHaveLength(2);
+    expect(sent[1]?.key).toBe(sent[0]?.key);
+    expect(sent[1]?.auth).not.toBe(sent[0]?.auth);
+    expect(callsTo(fetchMock, '/api/account/refresh')).toHaveLength(2); // restore + renewal
+  });
+
+  it('does not silently turn an expired session into a guest order', async () => {
+    seedCart();
+    seedSession();
+    let refreshes = 0;
+    const sent: (string | null)[] = [];
+    mockApi({
+      routes: {
+        ...accountRoutes(),
+        '/api/account/refresh': () => (++refreshes === 1 ? jsonResponse(issueTokens()) : unauthorized()),
+      },
+      checkout: (_url, init) => {
+        sent.push(authHeader(init));
+        return sent.length === 1 ? unauthorized() : jsonResponse(confirmation);
+      },
+    });
+    const { user, dialog } = await openCheckout();
+    await user.type(within(dialog).getByLabelText('Full name'), 'Ada Lovelace');
+    await waitFor(() => expect(within(dialog).getByLabelText('Email')).toHaveValue('ada@example.com'));
+    await user.click(within(dialog).getByRole('button', { name: 'Place demo order' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent("Your session expired, so this order hasn't been placed");
+    expect(sent).toHaveLength(1);
+    expect(badge()).toHaveTextContent('1');
+    expect(within(dialog).getByLabelText('Full name')).toHaveValue('Ada Lovelace');
+
+    // Only an explicit choice places it as a guest.
+    await user.click(within(dialog).getByRole('button', { name: 'Place order as a guest' }));
+    expect(await screen.findByTestId('confirmation-where')).toHaveTextContent('guest');
+    expect(sent[1]).toBeNull();
+  });
+
+  it('lets a guest sign in from checkout and come back with their details kept', async () => {
+    seedCart();
+    mockApi({ routes: accountRoutes('ada@example.com'), checkout: () => jsonResponse(confirmation) });
+    const { user, dialog } = await openCheckout();
+    await user.type(within(dialog).getByLabelText('Full name'), 'Ada Lovelace');
+
+    await user.click(within(dialog).getByRole('button', { name: 'Sign in' }));
+    const signIn = screen.getByRole('dialog', { name: 'Sign in' });
+    await user.type(within(signIn).getByLabelText('Email'), 'ada@example.com');
+    await user.type(within(signIn).getByLabelText('Password'), 'Str0ng!Passw0rd');
+    await user.click(within(signIn).getByRole('button', { name: 'Sign in' }));
+
+    const back = await screen.findByRole('dialog', { name: 'Check out' });
+    await waitFor(() => expect(within(back).getByTestId('checkout-account')).toHaveTextContent('Signed in as ada@example.com'));
+    expect(within(back).getByLabelText('Full name')).toHaveValue('Ada Lovelace');
+    expect(within(back).getByLabelText('Email')).toHaveValue('ada@example.com');
   });
 });

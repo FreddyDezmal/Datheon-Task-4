@@ -1,3 +1,4 @@
+import type { AccountInfo, AuthTokens, OrderDetails, OrderSummary } from '../types/account';
 import type { CheckoutConfirmation, OrderLine, OrderQuote, OrderTotals } from '../types/checkout';
 import type { Category, Product, ProductList } from '../types/product';
 import type { PricingRules } from '../types/store';
@@ -145,5 +146,44 @@ export function parseCheckoutConfirmation(value: unknown): CheckoutConfirmation 
     totals: parseTotals(o.totals),
     isSimulated,
     notice: str(o, 'notice'),
+  };
+}
+
+export function parseAuthTokens(value: unknown): AuthTokens {
+  const o = obj(value, 'tokens');
+  const accessToken = str(o, 'accessToken');
+  const refreshToken = str(o, 'refreshToken');
+  const expiresIn = num(o, 'expiresIn');
+  if (!accessToken || !refreshToken || expiresIn <= 0) throw new ShapeError('tokens are incomplete');
+  return { accessToken, refreshToken, expiresIn };
+}
+
+export function parseAccountInfo(value: unknown): AccountInfo {
+  return { email: str(obj(value, 'account'), 'email') };
+}
+
+export function parseOrderSummaries(value: unknown): OrderSummary[] {
+  if (!Array.isArray(value)) throw new ShapeError('orders is not an array');
+  return value.map((item) => {
+    const o = obj(item, 'order');
+    return {
+      orderReference: str(o, 'orderReference'),
+      createdAt: str(o, 'createdAt'),
+      itemCount: int(o, 'itemCount'),
+      total: num(o, 'total'),
+      currency: str(o, 'currency'),
+    };
+  });
+}
+
+export function parseOrderDetails(value: unknown): OrderDetails {
+  const o = obj(value, 'order');
+  return {
+    orderReference: str(o, 'orderReference'),
+    createdAt: str(o, 'createdAt'),
+    customerName: str(o, 'customerName'),
+    customerEmail: str(o, 'customerEmail'),
+    lines: arr(o, 'lines').map(parseOrderLine),
+    totals: parseTotals(o.totals),
   };
 }

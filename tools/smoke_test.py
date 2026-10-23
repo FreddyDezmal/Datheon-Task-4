@@ -272,6 +272,11 @@ def main() -> int:
                 status == 200 and money(detail["totals"]["total"]) == exp["total"], f"{status} {detail}")
         status, _, _ = request("GET", f"{api}/api/orders/{r1.get('orderReference')}", headers=auth)
         r.check("someone else's (guest) order -> 404", status == 404, f"{status}")
+        status, _, res = request("POST", f"{api}/api/account/refresh", {"refreshToken": token["refreshToken"]})
+        r.check("refresh token -> new access token", status == 200 and "accessToken" in (res or {}), f"{status}")
+    status, _, res = request("POST", f"{api}/api/checkout", one, headers={"Authorization": "Bearer expired-or-forged"})
+    r.check("checkout with an invalid token -> 401, not a silent guest order",
+            status == 401 and isinstance(res, dict) and res.get("code") == "UNAUTHORIZED", f"{status} {res}")
 
     print("\n[CORS]")
     pre = {"Origin": args.origin, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"}

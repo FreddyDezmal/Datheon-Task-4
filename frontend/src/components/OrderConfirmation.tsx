@@ -4,12 +4,15 @@ import { CheckIcon } from './Icons';
 
 interface OrderConfirmationProps {
   confirmation: CheckoutConfirmation;
+  /** The server returned the order an earlier attempt had already placed (Idempotent-Replayed). */
+  replayed: boolean;
+  savedToAccount: boolean;
   locale: string;
   onDone: () => void;
 }
 
 /** Shows the server's confirmation. All amounts here come from the server, not the cart. */
-export function OrderConfirmation({ confirmation, locale, onDone }: OrderConfirmationProps) {
+export function OrderConfirmation({ confirmation, replayed, savedToAccount, locale, onDone }: OrderConfirmationProps) {
   const { totals } = confirmation;
   const money = (amount: number) => formatMajor(amount, totals.currency, locale);
   const placedAt = new Date(confirmation.createdAt).toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
@@ -32,8 +35,19 @@ export function OrderConfirmation({ confirmation, locale, onDone }: OrderConfirm
           <p className="confirmation__meta">
             Placed {placedAt} for {confirmation.customerEmail}
           </p>
+          <p className="confirmation__meta" data-testid="confirmation-where">
+            {savedToAccount
+              ? 'It is saved to your account, under Your account → Orders.'
+              : 'You checked out as a guest, so keep this reference: guest orders are not linked to an account.'}
+          </p>
         </div>
       </div>
+
+      {replayed && (
+        <p className="alert alert--info" data-testid="confirmation-replayed">
+          Your earlier attempt had already placed this order, so it was not placed a second time.
+        </p>
+      )}
 
       <table className="confirmation__table">
         <caption className="visually-hidden">Items in order {confirmation.orderReference}</caption>

@@ -58,3 +58,10 @@ export const StarIcon = (props: IconProps) => (
     <path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.8z" />
   </svg>
 );
+
+export const UserIcon = (props: IconProps) => (
+  <svg {...base} {...props}>
+    <circle cx="12" cy="8.5" r="3.8" />
+    <path d="M4.5 20a7.5 7.5 0 0 1 15 0" />
+  </svg>
+);

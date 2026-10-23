@@ -1,7 +1,8 @@
 import type { Ref } from 'react';
+import { useSession } from '../context/SessionContext';
 import type { Category } from '../types/product';
 import { CategoryNav } from './CategoryNav';
-import { BagIcon } from './Icons';
+import { BagIcon, UserIcon } from './Icons';
 import { SearchField } from './SearchField';
 
 interface NavbarProps {
@@ -12,6 +13,7 @@ interface NavbarProps {
   onCategoryChange: (slug: string) => void;
   cartUnitCount: number;
   onCartOpen: () => void;
+  onAccountOpen: () => void;
   onBrandClick: () => void;
   cartButtonRef?: Ref<HTMLButtonElement>;
 }
@@ -24,10 +26,14 @@ export function Navbar({
   onCategoryChange,
   cartUnitCount,
   onCartOpen,
+  onAccountOpen,
   onBrandClick,
   cartButtonRef,
 }: NavbarProps) {
+  const { status, email } = useSession();
   const cartLabel = cartUnitCount === 1 ? 'Open cart, 1 item' : `Open cart, ${cartUnitCount} items`;
+  const signedIn = status !== 'anonymous';
+  const accountLabel = status === 'signed-in' && email ? `Your account, signed in as ${email}` : signedIn ? 'Your account' : 'Sign in';
 
   return (
     <header className="site-header">
@@ -48,15 +54,28 @@ export function Navbar({
 
         <SearchField value={search} onChange={onSearchChange} />
 
-        <button ref={cartButtonRef} type="button" className="cart-button" onClick={onCartOpen} aria-label={cartLabel}>
-          <BagIcon />
-          <span className="cart-button__label">Cart</span>
-          {cartUnitCount > 0 && (
-            <span className="cart-button__badge" data-testid="cart-badge" aria-hidden="true">
-              {cartUnitCount > 99 ? '99+' : cartUnitCount}
-            </span>
-          )}
-        </button>
+        <div className="site-header__actions">
+          <button
+            type="button"
+            className={`cart-button account-button${signedIn ? ' is-signed-in' : ''}`}
+            onClick={onAccountOpen}
+            aria-label={accountLabel}
+            data-testid="account-button"
+          >
+            <UserIcon />
+            <span className="cart-button__label">{signedIn ? 'Account' : 'Sign in'}</span>
+            {signedIn && <span className="account-button__dot" aria-hidden="true" />}
+          </button>
+          <button ref={cartButtonRef} type="button" className="cart-button" onClick={onCartOpen} aria-label={cartLabel}>
+            <BagIcon />
+            <span className="cart-button__label">Cart</span>
+            {cartUnitCount > 0 && (
+              <span className="cart-button__badge" data-testid="cart-badge" aria-hidden="true">
+                {cartUnitCount > 99 ? '99+' : cartUnitCount}
+              </span>
+            )}
+          </button>
+        </div>
       </div>
       <CategoryNav categories={categories} selected={selectedCategory} onSelect={onCategoryChange} />
     </header>

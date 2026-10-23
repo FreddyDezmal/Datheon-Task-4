@@ -1,10 +1,10 @@
 # Greenhaus: full-stack e-commerce catalogue and cart
 
-A demo storefront with a React + TypeScript frontend and an ASP.NET Core Web API backend-for-frontend over [FakeStoreAPI](https://fakestoreapi.com). It covers catalogue search, filtering and sorting, a persistent slide-out cart, exact money arithmetic, and a checkout that the server re-prices, re-validates and saves to a local SQLite database. Customers can create accounts and view their own orders through the API.
+A demo storefront with a React + TypeScript frontend and an ASP.NET Core Web API backend-for-frontend over [FakeStoreAPI](https://fakestoreapi.com). It covers catalogue search, filtering and sorting, a persistent slide-out cart, exact money arithmetic, and a checkout that the server re-prices, re-validates and saves to a local SQLite database. Shoppers can check out as guests or create an account, sign in, and see their order history. Every product has a details view with a shareable link.
 
 > Checkout is a **demo**: no payment is taken and no card details are requested. Orders are saved locally in `backend/Storefront.Api/App_Data/storefront.db`.
 
-**Backend design** (layers, authentication, database, idempotency, error codes): see [`Documentation/Backend.md`](Documentation/Backend.md).
+**Design notes:** [`Documentation/Backend.md`](Documentation/Backend.md) (layers, authentication, database, idempotency, error codes) and [`Documentation/Frontend.md`](Documentation/Frontend.md) (API layer, sessions, checkout outcomes, responsive and accessibility decisions).
 
 ---
 
@@ -14,23 +14,25 @@ A demo storefront with a React + TypeScript frontend and an ASP.NET Core Web API
  Browser (React, :5173)                  ASP.NET Core API (:5080)                    FakeStoreAPI
 ┌─────────────────────────────┐        ┌──────────────────────────────────┐        ┌──────────────┐
 │ CatalogPage ── useProducts ─┼─GET───▶│ ProductsController               │        │ /products    │
-│ Navbar / CategoryNav        │        │   └ ProductCatalogService ───────┼─GET───▶│ /products/id │
+│ ProductDetailsDialog ───────┼─GET───▶│   └ ProductCatalogService ───────┼─GET───▶│ /products/id │
 │ CartContext (useReducer)    │        │       ├ CategoryNormalizer       │        └──────────────┘
 │   └ localStorage (v1)       │        │       └ ProductBadgeRules        │
 │ CartDrawer / CheckoutDialog ┼─POST──▶│ CheckoutController (guest or     │
 │   (Idempotency-Key header)  │        │   signed-in) └ CheckoutService ──┼──┐
 │ utils/pricing (int cents)   │◀───────┤       ├ CheckoutRequestValidator │  │     SQLite (EF Core)
 │ StoreConfigContext ─────────┼─GET───▶│       └ PricingCalculator        │  ├──▶ App_Data/storefront.db
-└─────────────────────────────┘        │ OrdersController [Authorize]     │  │     Orders, OrderLines,
-                                       │   └ OrderQueryService ───────────┼──┤     Identity users
- Any API client (Swagger, curl) ──────▶│ /api/account/* (Identity API)    ┼──┘
+│ AccountDialog / MyOrders ───┼─GET───▶│ OrdersController [Authorize]     │  │     Orders, OrderLines,
+│ SessionContext (bearer) ────┼─POST──▶│   └ OrderQueryService ───────────┼──┤     Identity users
+└─────────────────────────────┘        │ /api/account/* (Identity API)    ┼──┘
                                        │ GlobalExceptionHandler → ProblemDetails │
                                        └──────────────────────────────────┘
 ```
 
 **Backend responsibilities.** Fetch and validate upstream data; normalise categories (`jewelery` → `jewelry`, men's and women's clothing grouped under `clothing`); compute badges; apply search, category, price range and sort; publish the pricing rules. At checkout: validate the request, look up authoritative prices, calculate totals with `decimal`, and save the order and its lines in one transaction. It also manages customer accounts (ASP.NET Core Identity), serves each signed-in customer their own orders, and returns structured errors.
 
-**Frontend responsibilities.** Render the catalogue and keep filters in the URL; manage the cart in one reducer; persist it to localStorage; show estimated totals using the same rules as the server; run the checkout flow and recover from every failure without losing the cart.
+**Frontend responsibilities.** Render the catalogue and product details, keeping filters and the open product in the URL; manage the cart in one reducer and persist it to localStorage; show estimated totals using the same rules as the server; manage the sign-in session (bearer tokens, refresh, expiry); run the checkout flow and recover from every failure without losing the cart or placing an order twice.
+
+**What lives where.** The cart is local to the browser (localStorage) for guests and signed-in shoppers alike; it is not synced to the account. Orders are saved on the server, and signed-in shoppers can list them. The sign-in session keeps the refresh token in this tab's sessionStorage and the short-lived access token in memory only.
 
 ### Key decisions
 
@@ -38,7 +40,8 @@ A demo storefront with a React + TypeScript frontend and an ASP.NET Core Web API
 |---|---|---|
 | Cart ownership | **Client-managed cart in localStorage; server validates at checkout** (option 1 in the brief) | Refresh-survival is free, guests need no account, and the security boundary stays where it matters: the server never trusts client prices. `GET /api/cart` is therefore not implemented. |
 | Database | **SQLite file + EF Core 10, with migrations** | Runs on any machine with no server to install. Orders snapshot titles and prices, so history survives catalogue changes. The catalogue itself stays upstream (FakeStoreAPI). |
-| Accounts | **ASP.NET Core Identity API endpoints, bearer tokens** | Built-in password hashing, lockout and tokens; no custom JWT code. Guest checkout stays open, so the frontend works without signing in. |
+| Accounts | **ASP.NET Core Identity API endpoints, bearer tokens** | Built-in password hashing, lockout and tokens; no custom JWT code. Guest checkout stays open. The frontend signs in with the same endpoints and refreshes the token when it expires. |
+| Expired session at checkout | **401, never a silent guest order** | A checkout sent with an invalid or expired token is rejected, so the frontend renews the token and resends the same order (same key), or tells the shopper and lets them choose guest checkout. |
 | Retries | **`Idempotency-Key` header on checkout** | Repeating a request returns the original order instead of a second one; the frontend reuses the key on **Try again**. |
 | Where filtering happens | Backend (`GET /api/products?search=&category=&sort=`) | One implementation of the rules, tested once in xUnit. The frontend debounces search (250 ms) and aborts superseded requests. |
 | Money on the client | Integer minor units (`priceMinor` from the API) | No float accumulation. Tax uses basis points (`subtotal × 800 / 10 000`) so the result is exact before rounding. |
@@ -80,6 +83,7 @@ storefront/
 ├── README.md
 ├── Documentation/
 │   ├── Backend.md                   # backend design: layers, auth, database, idempotency, error codes
+│   ├── Frontend.md                  # frontend design: API layer, sessions, checkout outcomes, responsive/a11y
 │   └── Audits/                      # AUDIT.md (audit report) and storefront-audit.patch
 ├── .gitignore
 ├── tools/
@@ -113,15 +117,16 @@ storefront/
     ├── public/favicon.svg
     └── src/
         ├── main.tsx  App.tsx  App.test.tsx  vite-env.d.ts
-        ├── components/   # Navbar, SearchField, CategoryNav, ProductCard, SortSelect, StatusMessage,
-        │                 # CartDrawer, CartLineItem, QuantityStepper, OrderSummary,
-        │                 # CheckoutDialog (+test), CheckoutForm, OrderConfirmation, Icons
+        ├── components/   # Navbar, SearchField, CategoryNav, ProductCard, ProductDetailsDialog (+test), SortSelect,
+        │                 # StatusMessage, CartDrawer, CartLineItem, QuantityStepper, OrderSummary,
+        │                 # CheckoutDialog (+test), CheckoutForm, OrderConfirmation,
+        │                 # AccountDialog, AuthForm, MyOrders (Account.test), Icons
         ├── pages/        # CatalogPage
-        ├── context/      # cartReducer (+test), CartContext, StoreConfigContext, ToastContext
+        ├── context/      # cartReducer (+test), CartContext, SessionContext, StoreConfigContext, ToastContext
         ├── hooks/        # useProducts, useCategories, useCatalogQuery, useDebouncedValue, useModalBehavior
-        ├── services/     # apiClient, productService, checkoutService, responseParsers
-        ├── types/        # product, cart, checkout, store
-        ├── utils/        # pricing (+test), money, cartStorage (+test), checkoutValidation
+        ├── services/     # apiClient (+test), productService, checkoutService, accountService, responseParsers
+        ├── types/        # product, cart, checkout, store, account
+        ├── utils/        # pricing (+test), money, cartStorage (+test), sessionStorage, checkoutValidation
         ├── config/       # env
         ├── styles/       # tokens, base, layout, catalog, cart, checkout
         └── test/         # setup, fixtures (fake API)
@@ -190,7 +195,9 @@ dotnet ef database update --project Storefront.Api
 
 ### Accounts (optional)
 
-The frontend checks out as a guest. To try accounts, use Swagger (`/swagger`, the **Account** section) or any HTTP client:
+In the app, select **Sign in** in the header, then **Create an account**. Orders placed while signed in appear under **Account → Orders**; you can also sign in from checkout and come back to your order with your details kept. Guest checkout always works.
+
+The same endpoints work from Swagger (`/swagger`, the **Account** section) or any HTTP client:
 
 ```bash
 curl -X POST http://localhost:5080/api/account/register -H "Content-Type: application/json" -d '{"email":"ada@example.com","password":"Str0ng!Passw0rd"}'
@@ -220,13 +227,13 @@ The mock's modes, switched with `GET /__mode/<mode>`: `ok` (default), `500` (eve
 cd storefront/backend
 dotnet restore
 dotnet build -c Release
-dotnet test -c Release --no-build --logger "console;verbosity=normal"   # 160 tests; each test uses its own temporary SQLite database
+dotnet test -c Release --no-build --logger "console;verbosity=normal"   # 161 tests; each test uses its own temporary SQLite database
 
 # Frontend
 cd storefront/frontend
 npm ci
 npm run typecheck      # strict tsc -b
-npm test               # Vitest + Testing Library (jsdom)
+npm test               # Vitest + Testing Library (jsdom), 98 tests; the API is mocked with real response shapes
 npm run build          # type-check + production bundle
 ```
 
@@ -300,7 +307,7 @@ All errors use `application/problem+json` with `status`, `title`, `code`, `trace
 | `GET /api/products/{id}` | One product | 200 | 400, 404 `NOT_FOUND`, 502, 504 |
 | `GET /api/categories` | Normalised categories with counts and groups | 200 | 502, 504 |
 | `GET /api/store/config` | Currency and pricing rules | 200 | none |
-| `POST /api/checkout` | Places and saves an order (no payment). Public; a bearer token links the order to that account. Body: `customer`, `items[]` (`productId`, `quantity`), `expectedTotal` (required). Optional `Idempotency-Key` header | 200 (`Idempotent-Replayed: true` on a repeat) | 400 `VALIDATION_FAILED`, 409 `PRICE_CHANGED`, 413 `REQUEST_TOO_LARGE` (body over 64 KiB), 415, 422 `PRODUCTS_UNAVAILABLE` / `IDEMPOTENCY_KEY_REUSED`, 429 `TOO_MANY_REQUESTS`, 502, 504 |
+| `POST /api/checkout` | Places and saves an order (no payment). Public; a bearer token links the order to that account, and an invalid or expired token is rejected with 401 rather than becoming a guest order. Body: `customer`, `items[]` (`productId`, `quantity`), `expectedTotal` (required). Optional `Idempotency-Key` header | 200 (`Idempotent-Replayed: true` on a repeat) | 400 `VALIDATION_FAILED`, 401 `UNAUTHORIZED`, 409 `PRICE_CHANGED`, 413 `REQUEST_TOO_LARGE` (body over 64 KiB), 415, 422 `PRODUCTS_UNAVAILABLE` / `IDEMPOTENCY_KEY_REUSED`, 429 `TOO_MANY_REQUESTS`, 502, 504 |
 | `GET /api/orders` | **Signed in.** Your orders, newest first (up to 100) | 200 | 401 `UNAUTHORIZED` |
 | `GET /api/orders/{reference}` | **Signed in.** One of your orders, as stored at checkout | 200 | 401, 404 `NOT_FOUND` (also for someone else's order) |
 | `POST /api/account/register`, `/login`, `/refresh` | ASP.NET Core Identity endpoints (also `/manage/info`, `/forgotPassword`, `/resetPassword`, 2FA) | 200 | 400 `VALIDATION_FAILED`, 401, 429 `TOO_MANY_REQUESTS` |
@@ -411,12 +418,21 @@ Any extra fields the client sends (such as `unitPrice`) are ignored; the server 
 | API or FakeStoreAPI down on first load | An error panel with the reason and **Try again**. Filters still render (fallback categories). |
 | Failure while refining a search | The previous results stay, with an inline alert and **Try again**. |
 | Corrupt, unknown-version or partly invalid saved cart | Invalid data is discarded or repaired, a notice is shown, and the app never crashes. |
-| Checkout network error, 5xx or timeout | The cart is kept and **Try again** resubmits with the same `Idempotency-Key`, so if the first attempt did reach the server, the original order is returned rather than a second one placed. |
+| Checkout network error, 5xx, timeout or unreadable response | "We couldn't confirm whether your order went through." The cart is kept and **Try again** resubmits with the same `Idempotency-Key`: if the first attempt did reach the server, that order is shown (with a note that it wasn't placed twice) instead of a second one being created. Nothing is resubmitted automatically. |
+| 429 rate limited | "Too many requests. Wait N seconds" (from `Retry-After`); the cart is kept. |
+| 413 request too large / 503 database busy | A plain explanation; 503 offers **Try again**. |
+| Signed-in token expired during checkout | Renewed once and the same order resent. If the session can't be renewed: "Your session expired, so this order hasn't been placed", with **Sign in again** or **Place order as a guest**. |
+| 422 idempotency key reused | "An earlier attempt at this order may already have been placed. Check before placing it again." A new key is used for the next attempt. |
+| Saved session rejected on load, or orders return 401 | The session is renewed once; if that fails the shopper is signed out with a notice. Nothing redirects, so there's no loop. |
+| Wrong password, locked account, duplicate email, password rules | Shown on the field it belongs to (or above the button), with the typed values kept. |
+| Product link to a missing product | "This product is no longer in the catalogue." |
 | 409 price change | Cart prices update from the server quote, the new total is shown, and the button becomes **Confirm new total and place order**. |
 | 422 unavailable products | The affected items are named, with **Remove unavailable items**. |
 | 400 validation | Field errors appear under the inputs. |
 
-Accessibility: semantic landmarks and a skip link; the drawer and dialog use `role="dialog"` and `aria-modal`, move focus in, trap Tab, close on Escape or backdrop click, and return focus to the trigger. The page behind is made `inert` and scroll-locked. Focus rings are visible, and live regions announce toasts, quantities and result counts. `prefers-reduced-motion` disables transitions and the skeleton shimmer.
+Accessibility: semantic landmarks, a skip link and one `h1` per view with `h2` product titles; the drawer and dialogs use `role="dialog"` and `aria-modal`, move focus in, trap Tab, close on Escape or backdrop click, and return focus to the trigger. Only one overlay is open at a time. The page behind is made `inert` and scroll-locked. Focus rings are visible, live regions announce toasts, quantities and result counts, and form errors are tied to their fields with `aria-describedby`. `prefers-reduced-motion` disables transitions and the skeleton shimmer.
+
+Responsive: layouts were checked at 320, 375, 768, 1024 and 1440 px wide with no horizontal scrolling. On phones, dialogs become bottom sheets sized with `dvh`, respect the safe-area inset, and checkout scrolls its message and buttons into view. Toasts let taps pass through and are cleared when the cart or checkout opens.
 
 ---
 
@@ -436,6 +452,8 @@ Accessibility: semantic landmarks and a skip link; the drawer and dialog use `ro
 - 503 `DATABASE_BUSY`: another process (often a SQLite viewer holding a write transaction) has the file locked. Close it and retry.
 - To start over, stop the API and delete `backend/Storefront.Api/App_Data/storefront.db`.
 
+**Signed out unexpectedly, or "Your session has expired".** Sessions last for the browser tab; closing the tab signs you out. Restarting the API keeps sessions only if its Data Protection keys survive (they do by default on a developer machine).
+
 **401 on `/api/orders`.** Send the `accessToken` from `/api/account/login` as `Authorization: Bearer <token>`. Tokens expire after an hour; use `/api/account/refresh` or sign in again. If you clear your user profile's Data Protection keys, existing tokens stop working.
 
 **429 Too Many Requests.** The per-client limits are 10 account requests and 30 checkouts per minute. Raise them with `RateLimiting__AccountPermitLimit` and `RateLimiting__CheckoutPermitLimit` for load or smoke testing.
@@ -452,7 +470,20 @@ Accessibility: semantic landmarks and a skip link; the drawer and dialog use `ro
 
 ## 9. Verification status
 
-**Current version (database, accounts, idempotency).** Verified on 22 October 2026 in a Linux workspace with .NET SDK 10.0.401 (runtime 10.0.12), Node 22.22.0, and NuGet packages restored on the project owner's Windows machine:
+**Current version (frontend accounts, product details, responsive and error-handling pass).** Verified on 23 October 2026 in a Linux workspace (.NET SDK 10.0.401, Node 22.22.0, headless Chromium) against the real API backed by `tools/fakestore_mock.py`:
+
+| Check | Result |
+|---|---|
+| Frontend `npm run typecheck`, `npm run build` | **Passed**: strict `tsc -b`, production bundle 287 KB JS (87 KB gzip). No lint tool is configured in this repo. |
+| Frontend `npm test` | **Passed: 98 of 98** (was 56). New tests cover sign-in, registration errors, session restore and expiry, token renewal, order history, signed-in and expired-session checkout, uncertain outcomes, 429/413/422, product details. 11 of 13 deliberate breakages were caught; the other 2 are redundant safeguards (see `Documentation/Frontend.md`). |
+| Backend `dotnet build -c Release`, `dotnet test -c Release` | **Passed: 161 of 161** (adds: checkout with an invalid token returns 401 and saves nothing; mutation-checked) |
+| `tools/smoke_test.py --mock` | **Passed: 59 of 59** (adds: token refresh, invalid token on checkout) |
+| Browser flows at 1280, 768 and 375 px | **Passed 16 of 16 checks at each size**: product details and shared links, register, signed-in checkout, order history, session restored after reload, interrupted checkout recovered without a duplicate, sign-out, duplicate email, wrong password, rejected saved session. No console errors other than the requests the tests failed on purpose. |
+| Layout at 320, 375, 768, 1024, 1440 px | **Passed**: no horizontal overflow on catalogue, cart or checkout |
+| Keyboard | **Passed**: tab order from the top of the page, focus moved into and back out of every dialog, Tab trapped, Escape closes, visible focus rings, reduced motion honoured |
+| Owner's Windows machine and live FakeStoreAPI for this version | **Not yet run** (see the previous version's results below) |
+
+**Previous version (database, accounts, idempotency).** Verified on 22 October 2026 in a Linux workspace with .NET SDK 10.0.401 (runtime 10.0.12), Node 22.22.0, and NuGet packages restored on the project owner's Windows machine:
 
 | Check | Result |
 |---|---|
@@ -473,7 +504,10 @@ The audit of the previous version is in `Documentation/Audits/AUDIT.md`.
 - **Pricing rules fallback.** If `/api/store/config` fails at page load, the cart uses built-in defaults. If the server is configured differently, every checkout returns 409 until the page is reloaded.
 - **Catalogue cache.** Prices are authoritative as of the last fetch (5 minutes by default). When the cache expires during an outage, the store fails closed (502) rather than serving stale prices. Concurrent cold-cache requests each call FakeStoreAPI (no single-flight).
 - No retry or circuit breaker on upstream calls (`Microsoft.Extensions.Http.Resilience` would be the next step).
-- No login screen in the frontend: accounts work through the API (Swagger, curl), and the frontend checks out as a guest.
+- The cart is per browser and not saved to the account, so it doesn't follow a shopper to another device.
+- Signing out forgets the tokens in the browser, but Identity's bearer tokens can't be revoked server-side; an access token stays valid until it expires (1 hour).
+- The refresh token is in sessionStorage, which script on the page could read if an XSS bug were introduced; see `Documentation/Frontend.md` for the trade-off.
+- No password reset or account deletion in the UI (no email sender is configured).
 - No email sending, so accounts aren't email-confirmed and password-reset emails aren't delivered.
 - SQLite suits one server; see `Documentation/Backend.md` for the production checklist (database, Data Protection keys, forwarded headers, hosts).
 - Only two-decimal currencies are supported. Catalogue search and filters are server-side, so they need the API to be running.

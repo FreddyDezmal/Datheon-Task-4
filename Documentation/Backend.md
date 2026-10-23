@@ -55,6 +55,7 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 - **Why bearer tokens rather than cookies:** the frontend runs on a different origin (`:5173`). The browser never attaches header tokens automatically, so cross-site request forgery isn't possible. The cookie scheme Identity also registers is configured to answer 401/403 instead of redirecting to a login page.
 - **Authorization is enforced on the server.** `OrdersController` carries `[Authorize(Policy = "Customer")]`. That policy requires an authenticated user via the bearer scheme.
 - **Ownership:** every order query filters by the caller's user ID. Another customer's order returns **404**, not 403, so a valid reference can't be confirmed by probing.
+- **Checkout with a bad token fails loudly:** checkout is open to guests, but a request that sends an `Authorization` header the server can't authenticate (expired, forged) gets **401** before anything is saved. Without this, an expired session would quietly place a guest order that never shows up in the shopper's account.
 - **No mass assignment:** request DTOs contain only the fields a client may set. The order's owner comes from the token, never the body; extra fields such as `userId` or `unitPrice` are ignored (there's a test for this).
 - **Idempotency keys are scoped to their caller:** a key can only replay an order for the same user (or guest) with the same items and customer, so a key can't be used to read someone else's confirmation.
 
@@ -130,7 +131,7 @@ All errors are RFC 7807 `application/problem+json` with `status`, `title`, `trac
 |---|---|---|
 | 400 | `VALIDATION_FAILED` | Invalid body, query, `Idempotency-Key`, malformed JSON, Identity validation (for example a weak password). Field errors are in `errors`. |
 | 400 | `BAD_REQUEST` | Unreadable request (for example a truncated body) |
-| 401 | `UNAUTHORIZED` | Missing or invalid bearer token on a protected endpoint; wrong password at login |
+| 401 | `UNAUTHORIZED` | Missing or invalid bearer token on a protected endpoint; an invalid token on checkout; wrong password at login |
 | 403 | `FORBIDDEN` | Authenticated but not permitted (no such endpoints yet; mapped for consistency) |
 | 404 | `NOT_FOUND` | Unknown route, product or order (including another customer's order) |
 | 405 / 415 | `METHOD_NOT_ALLOWED` / `UNSUPPORTED_MEDIA_TYPE` | Wrong method or content type |
