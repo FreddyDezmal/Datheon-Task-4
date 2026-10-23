@@ -79,7 +79,7 @@ The backend is authoritative for prices and totals. The client sends product IDs
 | 429, 503 `DATABASE_BUSY`, 502/504 upstream | retryable | The message (with the wait time for 429); the cart is kept. |
 | 400, 413 | fix | Field errors under the inputs, or a plain message. |
 
-Idempotency keys: one key per distinct order body. A retry of the same body reuses it, and any change to the cart or details creates a new one. The key isn't tied to the sign-in state on purpose. If a guest attempt might have succeeded and the shopper then signs in, reusing the key makes the API answer 422 instead of quietly creating a second order.
+Idempotency keys: one key per distinct order body. A retry of the same body reuses it, and a change to the cart or details creates a new one, **except after an uncertain outcome**. Then the key is pinned (in this tab's sessionStorage, `greenhaus.pendingCheckout`, so it survives a reload) and reused for every attempt until the server confirms an order or answers 422 `IDEMPOTENCY_KEY_REUSED`. With a new key, a changed order after a lost response could have placed a second one; with the pinned key, the server returns the saved order or refuses with 422. The key isn't tied to the sign-in state on purpose. If a guest attempt might have succeeded and the shopper then signs in, reusing the key makes the API answer 422 instead of quietly creating a second order.
 
 Double submits: the submit button and fieldset are disabled while a request is in flight, and an in-flight ref guards the gap before React re-renders. (The ref is a backstop: tests can't trigger it on its own because the disabled button already stops the second submit.)
 

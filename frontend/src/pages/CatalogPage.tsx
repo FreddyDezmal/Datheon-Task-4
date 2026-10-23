@@ -1,7 +1,9 @@
 import { ProductCard, ProductCardSkeleton } from '../components/ProductCard';
 import { SortSelect } from '../components/SortSelect';
+import { ErrorReference } from '../components/ErrorReference';
 import { StatusMessage } from '../components/StatusMessage';
 import { useProducts } from '../hooks/useProducts';
+import type { ApiError } from '../services/apiClient';
 import type { CatalogQuery, Category, Product, SortOption } from '../types/product';
 
 interface CatalogPageProps {
@@ -15,8 +17,24 @@ interface CatalogPageProps {
 
 const SKELETON_COUNT = 8;
 
+/** What to tell the shopper when the product list can't be loaded at all, by cause. */
+function outageAdvice(error: ApiError): string {
+  switch (error.code) {
+    case 'NETWORK_ERROR':
+      return 'Your cart is saved on this device. The products will load again once the connection is back.';
+    case 'TIMEOUT':
+    case 'UPSTREAM_TIMEOUT':
+      return 'This is usually temporary. Try again in a moment.';
+    case 'UPSTREAM_UNAVAILABLE':
+    case 'UPSTREAM_MALFORMED':
+      return "Our product supplier isn't responding right now. Your cart is saved, so nothing is lost.";
+    default:
+      return error.isRetryable ? 'This is usually temporary. Your cart is saved.' : '';
+  }
+}
+
 export function CatalogPage({ query, categories, onSortChange, onResetFilters, onOpenProduct }: CatalogPageProps) {
-  const { status, products, error, retry } = useProducts(query);
+  const { status, products, error, stale, retry } = useProducts(query);
 
   const categoryName =
     query.category === 'all' ? 'All products' : (categories.find((c) => c.slug === query.category)?.name ?? 'Products');
@@ -44,7 +62,8 @@ export function CatalogPage({ query, categories, onSortChange, onResetFilters, o
         }
       >
         <p>{error.message}</p>
-        <p>If this keeps happening, check that the API is running on the configured URL, then try again.</p>
+        {outageAdvice(error) && <p>{outageAdvice(error)}</p>}
+        <ErrorReference error={error} />
       </StatusMessage>
     );
   } else if (products.length === 0 && status === 'success') {
@@ -69,6 +88,17 @@ export function CatalogPage({ query, categories, onSortChange, onResetFilters, o
   } else {
     content = (
       <>
+        {stale && status !== 'error' && (
+          <div className="alert alert--info" role="status">
+            <p>
+              We couldn't refresh the product list, so you're seeing a recently saved copy. Prices and availability are
+              checked again when you place an order.
+            </p>
+            <button type="button" className="button button--secondary" onClick={retry} disabled={status === 'loading'}>
+              Refresh
+            </button>
+          </div>
+        )}
         {status === 'error' && (
           <div className="alert alert--error" role="alert">
             <p>{error.message} Showing the last results that loaded.</p>

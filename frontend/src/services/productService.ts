@@ -1,6 +1,6 @@
 import type { CatalogQuery, Category, Product, ProductList } from '../types/product';
 import type { PricingRules } from '../types/store';
-import { apiRequest } from './apiClient';
+import { apiRequest, CATALOGUE_STALE_HEADER } from './apiClient';
 import { parseCategories, parseProduct, parseProductList, parseStoreConfig } from './responseParsers';
 
 export function buildProductQueryString(query: CatalogQuery): string {
@@ -11,6 +11,25 @@ export function buildProductQueryString(query: CatalogQuery): string {
   if (query.sort !== 'featured') params.set('sort', query.sort);
   const qs = params.toString();
   return qs ? `?${qs}` : '';
+}
+
+export interface Freshness {
+  /** True when the API served its last good copy because FakeStoreAPI couldn't be reached. */
+  stale: boolean;
+}
+
+export async function fetchProductsWithFreshness(
+  query: CatalogQuery,
+  signal?: AbortSignal,
+): Promise<ProductList & Freshness> {
+  let stale = false;
+  const list = await apiRequest(`/api/products${buildProductQueryString(query)}`, parseProductList, {
+    ...(signal ? { signal } : {}),
+    onResponse: (response) => {
+      stale = response.headers.get(CATALOGUE_STALE_HEADER) === 'true';
+    },
+  });
+  return { ...list, stale };
 }
 
 export function fetchProducts(query: CatalogQuery, signal?: AbortSignal): Promise<ProductList> {

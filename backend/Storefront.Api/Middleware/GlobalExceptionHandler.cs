@@ -29,7 +29,13 @@ public sealed class GlobalExceptionHandler(
         }
 
         var problem = Map(exception);
-        if (problem.Status >= 500)
+        httpContext.Items[CorrelationIdMiddleware.ErrorLoggedKey] = true;
+        if (IsKnownDependencyFailure(exception))
+        {
+            // Expected when FakeStoreAPI or the database is down: one structured line, no stack trace.
+            logger.LogWarning("Dependency failure: {Code} - {Message}", problem.Extensions["code"], exception.Message);
+        }
+        else if (problem.Status >= 500)
         {
             logger.LogError(exception, "Request failed: {Code}", problem.Extensions["code"]);
         }
@@ -39,6 +45,12 @@ public sealed class GlobalExceptionHandler(
         }
 
         httpContext.Response.StatusCode = problem.Status ?? StatusCodes.Status500InternalServerError;
+        if (problem.Status == StatusCodes.Status503ServiceUnavailable)
+        {
+            // Tells clients (and the frontend's message) when a retry is worth trying.
+            httpContext.Response.Headers.RetryAfter = RetryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         return await problemDetailsService.TryWriteAsync(new ProblemDetailsContext
         {
             HttpContext = httpContext,
@@ -46,6 +58,14 @@ public sealed class GlobalExceptionHandler(
             Exception = exception,
         });
     }
+
+    internal static bool IsKnownDependencyFailure(Exception exception) =>
+        exception is UpstreamServiceException
+        || (exception is not OrderOutcomeUnknownException
+            && (DatabaseErrors.IsBusy(exception) || DatabaseErrors.IsUnavailable(exception)));
+
+    /// <summary>Suggested wait before retrying a 503 (database busy or unavailable).</summary>
+    internal const int RetryAfterSeconds = 5;
 
     internal static ProblemDetails Map(Exception exception) => exception switch
     {
@@ -91,6 +111,17 @@ public sealed class GlobalExceptionHandler(
             },
             "IDEMPOTENCY_KEY_REUSED"),
 
+        // Before the database-code checks below: a busy or unopenable database *during COMMIT* is not
+        // a definite failure, whatever the SQLite error code says.
+        OrderOutcomeUnknownException => WithCode(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status500InternalServerError,
+                Title = "We couldn't confirm whether the order was saved.",
+                Detail = "Retry with the same Idempotency-Key: if the order was saved, it is returned rather than placed again. A request with a new key could create a second order.",
+            },
+            "DATABASE_ERROR"),
+
         DbUpdateConcurrencyException => WithCode(
             new ProblemDetails
             {
@@ -108,6 +139,15 @@ public sealed class GlobalExceptionHandler(
                 Detail = "Please try again in a moment.",
             },
             "DATABASE_BUSY"),
+
+        _ when DatabaseErrors.IsUnavailable(exception) => WithCode(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "The store's database is unavailable.",
+                Detail = "Please try again in a moment.",
+            },
+            "DATABASE_UNAVAILABLE"),
 
         DbUpdateException when DatabaseErrors.IsConstraintViolation(exception) => WithCode(
             new ProblemDetails

@@ -27,7 +27,14 @@ export default defineConfig({
       },
       {
         extends: true,
-        test: { name: 'component', include: ['src/components/**/*.test.tsx', 'src/App.test.tsx'] },
+        test: {
+          name: 'component',
+          include: ['src/components/**/*.test.tsx', 'src/App.test.tsx'],
+          // Whole workflows with simulated typing: about 1–5 s each here, and roughly 2–3× slower on
+          // some Windows machines (with coverage on). The 5 s default timed a two-checkout test out
+          // there. A timeout is not an assertion: no test relies on it to detect loops (they use settle()).
+          testTimeout: 20_000,
+        },
       },
     ],
     coverage: {

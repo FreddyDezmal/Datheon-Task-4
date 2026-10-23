@@ -39,5 +39,12 @@ public sealed class PriceChangedException(decimal expectedTotal, PriceBreakdown 
 }
 
 /// <summary>An Idempotency-Key was reused for a different order, or by a different caller.</summary>
+/// <summary>
+/// The order's COMMIT failed, so the application can't tell whether the order was saved. Never reported
+/// as a definite failure: the only safe next step is to retry with the same Idempotency-Key.
+/// </summary>
+public sealed class OrderOutcomeUnknownException(Exception inner)
+    : Exception("The order transaction failed while committing; its outcome is unknown.", inner);
+
 public sealed class IdempotencyKeyReusedException()
     : Exception("This Idempotency-Key was already used for a different order.");

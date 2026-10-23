@@ -39,7 +39,7 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 
 | Endpoint | Access | Why |
 |---|---|---|
-| `GET /api/products`, `/api/products/{id}`, `/api/categories`, `/api/store/config`, `/health` | Public | Catalogue browsing needs no account. |
+| `GET /api/products`, `/api/products/{id}`, `/api/categories`, `/api/store/config`, `/health`, `/health/live`, `/health/ready` | Public | Catalogue browsing needs no account. |
 | `POST /api/checkout` | Public (guest checkout). With a bearer token, the order is linked to that account. | The existing frontend checks out without signing in, and that contract is kept. |
 | `GET /api/orders`, `GET /api/orders/{reference}` | **Signed-in customer** (`Customer` policy) | Order history is personal data. |
 | `/api/account/*` | Public, rate-limited | Registration and sign-in. |
@@ -67,7 +67,7 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 | Request size | Checkout bodies over 64 KiB → 413; more than 50 lines → a single 400 error. |
 | Security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy: same-site`, and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (not on Swagger UI). |
 | HTTPS | Outside Development: `UseHsts()` (1 year) and `UseHttpsRedirection()`. Development stays on `http://localhost:5080` for the Vite dev server. |
-| CORS | Only the configured origins; methods GET and POST; headers `Content-Type`, `Accept`, `Authorization`, `Idempotency-Key`. Exposes `Idempotent-Replayed` and `Retry-After`. |
+| CORS | Only the configured origins; methods GET and POST; headers `Content-Type`, `Accept`, `Authorization`, `Idempotency-Key`, `X-Correlation-Id`. Exposes `Idempotent-Replayed`, `Retry-After`, `X-Correlation-Id` and `Catalogue-Stale`. |
 | Host filtering | `AllowedHosts: localhost;127.0.0.1`. Other `Host` headers get 400. |
 | Secrets | None in the repository. SQLite has no password; Data Protection keys are created in the user profile at runtime. |
 | Development vs production | `appsettings.Development.json` turns on migrations at startup and allows `127.0.0.1:5173`; everything else defaults to the stricter setting. |
@@ -125,7 +125,7 @@ dotnet ef migrations add <Name> --project Storefront.Api --output-dir Data/Migra
 
 ## 4. Error handling
 
-All errors are RFC 7807 `application/problem+json` with `status`, `title`, `traceId` and a stable `code`. 5xx responses never include exception messages, SQL, stack traces or configuration.
+All errors are RFC 7807 `application/problem+json` with `status`, `title`, `traceId` and a stable `code`. `traceId` equals the response's `X-Correlation-Id`. 5xx responses never include exception messages, SQL, stack traces or configuration. Every 503 carries `Retry-After: 5`.
 
 | Status | `code` | When |
 |---|---|---|
@@ -141,13 +141,15 @@ All errors are RFC 7807 `application/problem+json` with `status`, `title`, `trac
 | 422 | `PRODUCTS_UNAVAILABLE` | Unknown product IDs (`unavailableProductIds`) |
 | 422 | `IDEMPOTENCY_KEY_REUSED` | Key reused for a different order or by a different caller |
 | 429 | `TOO_MANY_REQUESTS` | Rate limit hit; see `Retry-After` |
-| 500 | `DATABASE_ERROR` | Any other database failure |
+| 500 | `DATABASE_ERROR` | Any other database failure, including a checkout whose COMMIT failed ("We couldn't confirm whether the order was saved"). The outcome is unknown: retry with the same `Idempotency-Key` |
 | 500 | `INTERNAL_ERROR` | Anything unexpected |
-| 502 / 504 | `UPSTREAM_UNAVAILABLE` / `UPSTREAM_MALFORMED` / `UPSTREAM_TIMEOUT` | FakeStoreAPI failed, sent bad data, or was too slow |
-| 503 | `DATABASE_BUSY` | SQLite was locked; safe to retry |
+| 502 / 504 | `UPSTREAM_UNAVAILABLE` / `UPSTREAM_MALFORMED` / `UPSTREAM_TIMEOUT` | FakeStoreAPI failed, sent bad data, or was too slow (after bounded retries). Browsing endpoints return these only when there is no saved catalogue under 60 minutes old; otherwise 200 with `Catalogue-Stale: true`. Checkout always returns them. |
+| 503 | `DATABASE_BUSY` | SQLite was locked. On checkout, only returned when COMMIT was never sent, so nothing was saved; safe to retry |
+| 503 | `DATABASE_UNAVAILABLE` | The SQLite file couldn't be opened. On checkout, only returned when COMMIT was never sent, so nothing was saved; safe to retry |
 
 **Logging.**
-- 5xx errors are logged at Error, with the exception.
+- Unexpected 5xx errors are logged at Error, with the exception. Expected dependency failures (upstream, database busy or unavailable) are one Warning line with the code and no stack trace.
+- Every line written during a request carries its `CorrelationId`. Every error response is logged exactly once: by the exception handler, or, for errors answered without an exception, as `Request {Method} {Route} answered {StatusCode}.` (route pattern, not raw path). Logs are JSON outside Development.
 - 4xx rejections are logged at Information, with the code and the exception's message.
 - Checkout logs the order reference, line count, total and guest or signed-in status. It never logs passwords, tokens or customer emails.
 - EF's SQL command log is set to Warning, so parameter values aren't written to the log.
@@ -160,7 +162,8 @@ All errors are RFC 7807 `application/problem+json` with `status`, `title`, `trac
 - For more than one server or instance, move from SQLite to a server database (change the provider and regenerate migrations), or keep a single instance.
 - Apply migrations deliberately (`dotnet ef database update` or a migration bundle) rather than at startup.
 - Add an email sender and turn on `RequireConfirmedAccount`, if accounts become customer-facing.
-- Add upstream resilience (`Microsoft.Extensions.Http.Resilience`) for FakeStoreAPI.
+- Point liveness and readiness probes at `/health/live` and `/health/ready`; ship logs and alert on readiness 503 (see `Availability.md`).
+- Consider a circuit breaker (`Microsoft.Extensions.Http.Resilience`) on top of the existing bounded retries if FakeStoreAPI outages are long.
 
 ## 6. Questions you may be asked in review
 

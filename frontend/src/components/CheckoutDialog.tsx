@@ -3,9 +3,10 @@ import { useCart } from '../context/CartContext';
 import { useSession } from '../context/SessionContext';
 import { usePricingRules } from '../context/StoreConfigContext';
 import { useModalBehavior } from '../hooks/useModalBehavior';
-import { ApiError } from '../services/apiClient';
+import { ApiError, isBrowserOffline } from '../services/apiClient';
 import { createIdempotencyKey, submitCheckout, type CheckoutResult } from '../services/checkoutService';
 import { isUncertainOutcome } from '../utils/checkoutOutcome';
+import { clearPendingCheckoutKey, loadPendingCheckoutKey, savePendingCheckoutKey } from '../utils/pendingCheckout';
 import { parseOrderQuote } from '../services/responseParsers';
 import type { CheckoutConfirmation, CustomerDetails } from '../types/checkout';
 import { validateCustomer, type CustomerErrors } from '../utils/checkoutValidation';
@@ -21,14 +22,18 @@ interface CheckoutDialogProps {
   onSignIn: () => void;
 }
 
-export type CheckoutProblem =
+export type CheckoutProblem = (
   | { kind: 'price-changed'; message: string }
   | { kind: 'unavailable'; message: string; productIds: number[] }
   | { kind: 'retryable'; message: string }
   /** The request may have reached the server: only a retry with the same idempotency key is safe. */
   | { kind: 'uncertain'; message: string }
   | { kind: 'session-expired'; message: string }
-  | { kind: 'other'; message: string };
+  | { kind: 'other'; message: string }
+) & {
+  /** The server's correlation ID for a 5xx failure, shown so the shopper can quote it. */
+  reference?: string;
+};
 
 type Step =
   | { name: 'details' }
@@ -56,8 +61,24 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
   const abortRef = useRef<AbortController | null>(null);
   // Guards against a second submit landing before React re-renders the disabled button.
   const inFlightRef = useRef(false);
-  // One key per distinct order: a retry of the same request reuses it, any change gets a new one.
-  const idempotencyRef = useRef<{ body: string; key: string } | null>(null);
+  // One key per distinct order: a retry of the same request reuses it, and a change gets a new one,
+  // unless an earlier attempt's outcome is unknown. Then the key is pinned (and kept across reloads)
+  // until the server confirms an order or says the key belongs to a different one: the server
+  // reconciles by key, so reusing it can never create a second order, while a new key could.
+  const idempotencyRef = useRef<{ body: string; key: string; pinned: boolean } | null>(null);
+  if (idempotencyRef.current === null) {
+    const pending = loadPendingCheckoutKey();
+    if (pending) idempotencyRef.current = { body: '', key: pending, pinned: true };
+  }
+  const pinKey = () => {
+    if (!idempotencyRef.current) return;
+    idempotencyRef.current.pinned = true;
+    savePendingCheckoutKey(idempotencyRef.current.key);
+  };
+  const releaseKey = () => {
+    idempotencyRef.current = null;
+    clearPendingCheckoutKey();
+  };
 
   // Start fresh each time the dialog opens, but keep typed details for convenience.
   useEffect(() => {
@@ -94,6 +115,14 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
       setProblem({ kind: 'other', message: 'Your cart is empty. Add a product before checking out.' });
       return;
     }
+    // Without a connection the request can't arrive, so don't send it: the outcome stays certain.
+    if (isBrowserOffline()) {
+      setProblem({
+        kind: 'retryable',
+        message: "You're offline, so your order hasn't been sent. Your cart is saved. Place the order once you're back online.",
+      });
+      return;
+    }
 
     setProblem(null);
     setStep({ name: 'submitting' });
@@ -107,8 +136,12 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
       expectedTotal: minorToMajor(cart.totals.totalMinor),
     };
     const body = JSON.stringify(request);
-    if (idempotencyRef.current?.body !== body) {
-      idempotencyRef.current = { body, key: createIdempotencyKey() };
+    if (!idempotencyRef.current) {
+      idempotencyRef.current = { body, key: createIdempotencyKey(), pinned: false };
+    } else if (idempotencyRef.current.body !== body && !idempotencyRef.current.pinned) {
+      idempotencyRef.current = { body, key: createIdempotencyKey(), pinned: false };
+    } else {
+      idempotencyRef.current.body = body;
     }
 
     const idempotencyKey = idempotencyRef.current.key;
@@ -120,11 +153,14 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
       // request (same idempotency key) is sent once more; the API rejects a stale token before saving.
       const asAccount = session.status !== 'anonymous';
       const result: CheckoutResult = asAccount ? await session.withAccessToken((token) => send(token)) : await send();
-      idempotencyRef.current = null;
+      releaseKey();
       cart.clearCart();
       setStep({ name: 'confirmed', confirmation: result.confirmation, replayed: result.replayed, savedToAccount: asAccount });
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        pinKey(); // abandoned mid-request: it may have reached the server
+        return;
+      }
       setStep({ name: 'details' });
       handleFailure(error);
     } finally {
@@ -133,13 +169,23 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
   };
 
   const handleFailure = (error: unknown) => {
+    if (error instanceof ApiError && error.reference && error.status >= 500) {
+      const reference = error.reference;
+      reportProblem(error, (p) => setProblem({ ...p, reference }));
+      return;
+    }
+    reportProblem(error, setProblem);
+  };
+
+  const reportProblem = (error: unknown, show: (problem: CheckoutProblem) => void) => {
     if (!(error instanceof ApiError)) {
-      setProblem({ kind: 'retryable', message: 'Something went wrong. Your cart is saved, so you can try again.' });
+      show({ kind: 'retryable', message: 'Something went wrong. Your cart is saved, so you can try again.' });
       return;
     }
 
     if (isUncertainOutcome(error)) {
-      setProblem({
+      pinKey();
+      show({
         kind: 'uncertain',
         message:
           "We couldn't confirm whether your order went through. Your cart is saved. Select Try again: if the order was placed, you'll see it instead of a second order being created.",
@@ -149,7 +195,7 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
 
     switch (error.code) {
       case 'SESSION_EXPIRED':
-        setProblem({
+        show({
           kind: 'session-expired',
           message: "Your session expired, so this order hasn't been placed. Sign in again to save it to your account, or place it as a guest.",
         });
@@ -157,8 +203,8 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
       case 'IDEMPOTENCY_KEY_REUSED':
         // The earlier attempt with this key reached the store with different details or as a
         // different shopper. Start a new key, but tell the shopper first so they don't order twice.
-        idempotencyRef.current = null;
-        setProblem({
+        releaseKey();
+        show({
           kind: 'other',
           message:
             session.status === 'signed-in'
@@ -171,12 +217,12 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
           const quote = parseOrderQuote(error.problem?.quote);
           cart.syncPrices(quote.lines);
           const total = formatMoney(Math.round(quote.totals.total * 100), currency, locale);
-          setProblem({
+          show({
             kind: 'price-changed',
             message: `Some prices changed since you added these items. Your new total is ${total}. Place the order again to confirm.`,
           });
         } catch {
-          setProblem({ kind: 'retryable', message: 'Prices changed, but the updated quote could not be read. Try again.' });
+          show({ kind: 'retryable', message: 'Prices changed, but the updated quote could not be read. Try again.' });
         }
         return;
       }
@@ -185,7 +231,7 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
           ? (error.problem.unavailableProductIds as unknown[]).filter((v): v is number => typeof v === 'number')
           : [];
         const names = cart.items.filter((i) => ids.includes(i.productId)).map((i) => i.title);
-        setProblem({
+        show({
           kind: 'unavailable',
           productIds: ids,
           message: names.length
@@ -201,11 +247,11 @@ export function CheckoutDialog({ isOpen, onClose, onSignIn }: CheckoutDialogProp
         if (errors['customer.email']?.[0]) mapped.email = errors['customer.email'][0];
         setFieldErrors(mapped);
         const other = Object.entries(errors).find(([key]) => !key.startsWith('customer.'));
-        setProblem({ kind: 'other', message: other?.[1][0] ?? 'Check the highlighted fields and try again.' });
+        show({ kind: 'other', message: other?.[1][0] ?? 'Check the highlighted fields and try again.' });
         return;
       }
       default:
-        setProblem(
+        show(
           error.isRetryable
             ? { kind: 'retryable', message: `${error.message} Your cart is saved.` }
             : { kind: 'other', message: error.message },

@@ -215,7 +215,7 @@ test('a signed-in session survives a reload; a session the server rejects ends q
   await expect(page.getByRole('dialog')).toHaveCount(0); // no automatic redirect to a sign-in screen
 });
 
-test('a catalogue outage shows a recoverable error, and checkout keeps the cart', async ({ page, request }) => {
+test('during a catalogue outage browsing shows the saved copy, checkout fails safely and keeps the cart', async ({ page, request }) => {
   await addToCart(page, PRODUCTS.shirt.title);
   await setUpstream(request, '500');
 
@@ -223,16 +223,51 @@ test('a catalogue outage shows a recoverable error, and checkout keeps the cart'
   await checkout.getByLabel('Full name').fill('Ada Lovelace');
   await checkout.getByLabel('Email').fill('ada@example.test');
   await checkout.getByRole('button', { name: 'Place demo order' }).click();
-  await expect(checkout.getByRole('alert')).toContainText('Your cart is saved');
+  const alert = checkout.getByRole('alert');
+  await expect(alert).toContainText('Your cart is saved');
+  await expect(alert).toContainText(/Reference: [0-9a-f]{32}/);
+  await expect(alert).not.toContainText("couldn't confirm whether your order went through"); // nothing was saved
   await expect(page.getByTestId('cart-badge')).toHaveText('1');
   await checkout.getByRole('button', { name: 'Back to cart' }).click();
   await page.keyboard.press('Escape');
 
+  // The API serves its last good copy while FakeStoreAPI is down, and the page says so.
   await page.reload();
-  await expect(page.getByRole('heading', { name: "We couldn't load the catalogue" })).toBeVisible();
+  await expect(page.getByText('20 products')).toBeVisible();
+  const notice = page.getByRole('status').filter({ hasText: 'recently saved copy' });
+  await expect(notice).toBeVisible();
 
   await setUpstream(request, 'ok');
-  await page.getByRole('button', { name: 'Try again' }).click();
+  await notice.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('recently saved copy')).toHaveCount(0);
   await expect(page.getByText('20 products')).toBeVisible();
   await expect(page.getByTestId('cart-badge')).toHaveText('1');
+});
+
+test('offline: the cart is kept, checkout is held without sending anything, and works after reconnecting', async ({
+  page,
+  context,
+}) => {
+  await addToCart(page, PRODUCTS.shirt.title);
+  const checkoutRequests: string[] = [];
+  page.on('request', (req) => {
+    if (new URL(req.url()).pathname === '/api/checkout' && req.method() === 'POST') checkoutRequests.push(req.method());
+  });
+
+  const checkout = await openCheckout(page);
+  await checkout.getByLabel('Full name').fill('Ada Lovelace');
+  await checkout.getByLabel('Email').fill('ada@example.test');
+
+  await context.setOffline(true);
+  await expect(page.getByText("You're offline.")).toBeVisible();
+  await checkout.getByRole('button', { name: 'Place demo order' }).click();
+  await expect(checkout.getByRole('alert')).toContainText("You're offline, so your order hasn't been sent.");
+  expect(checkoutRequests).toEqual([]);
+  await expect(page.getByTestId('cart-badge')).toHaveText('1');
+
+  await context.setOffline(false);
+  await expect(page.getByText("You're offline.")).toHaveCount(0);
+  await checkout.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByRole('heading', { name: 'Order placed' })).toBeVisible();
+  expect(checkoutRequests).toEqual(['POST']);
 });

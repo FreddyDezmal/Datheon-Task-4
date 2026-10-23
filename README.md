@@ -182,7 +182,7 @@ cd storefront/frontend
 npm run dev
 ```
 
-Open **http://localhost:5173**. The health check is at `http://localhost:5080/health`.
+Open **http://localhost:5173**. Health checks: `http://localhost:5080/health/live` (process up) and `http://localhost:5080/health/ready` (database reachable and migrated; catalogue state). See `Documentation/Availability.md`.
 
 ### Database
 
@@ -252,7 +252,7 @@ npm run test:e2e                             # 16 tests; report: npm run test:e2
 
 ### End-to-end API smoke test
 
-`tools/smoke_test.py` checks a running API: every endpoint, Swagger, 200 random checkouts repriced against the documented policy, validation errors, request-size limits, idempotent retries, accounts and protected orders, CORS (including on error responses), and, with `--mock`, upstream 500, timeout and malformed-data handling.
+`tools/smoke_test.py` checks a running API: every endpoint, Swagger, 200 random checkouts repriced against the documented policy, validation errors, request-size limits, idempotent retries, accounts and protected orders, CORS (including on error responses), health endpoints and correlation IDs, and, with `--mock`, upstream 500, timeout and malformed-data handling (browsing from the saved catalogue, checkout failing closed).
 
 It sends a few hundred checkouts, far more than the normal rate limit (30 a minute per client), so start the API with higher limits for the run:
 
@@ -280,7 +280,11 @@ The exit code is non-zero if any check fails.
   "ConnectionStrings": { "Storefront": "Data Source=App_Data/storefront.db" },
   "Database": { "ApplyMigrationsOnStartup": false },
   "RateLimiting": { "AccountPermitLimit": 10, "CheckoutPermitLimit": 30, "WindowSeconds": 60 },
-  "FakeStore": { "BaseUrl": "https://fakestoreapi.com/", "TimeoutSeconds": 10, "CatalogueCacheSeconds": 300 },
+  "FakeStore": {
+    "BaseUrl": "https://fakestoreapi.com/", "TimeoutSeconds": 10, "AttemptTimeoutSeconds": 4,
+    "RetryCount": 2, "RetryBaseDelayMilliseconds": 200, "CatalogueCacheSeconds": 300, "StaleCatalogueMaxMinutes": 60
+  },
+  "Hosting": { "ShutdownTimeoutSeconds": 30 },
   "Pricing": {
     "Currency": "USD", "Locale": "en-US", "TaxRate": 0.08,
     "FlatShippingFee": 5.99, "FreeShippingThreshold": 50.00,
@@ -294,7 +298,8 @@ Options are validated at startup (`ValidateOnStart`), so an invalid URL, a tax r
 
 - **Database:** a relative `Data Source` is resolved against the `Storefront.Api` folder, wherever the app is started from. `ApplyMigrationsOnStartup` is `true` in `appsettings.Development.json` only.
 - **Rate limits** are per client IP and per window: `AccountPermitLimit` covers all `/api/account/*` endpoints, `CheckoutPermitLimit` covers `POST /api/checkout`. Over the limit returns 429 with `Retry-After`.
-- **AllowedHosts** rejects requests for other host names (400). Set your real host name in production, for example `AllowedHosts=shop.example.com`.
+- **AllowedHosts** rejects requests for other host names (400). Set your real host name in production, for example `AllowedHosts=shop.example.com`, and include the host name a health probe uses.
+- **FakeStore retries and fallback, shutdown and logging:** see `Documentation/Availability.md`. Logs are JSON outside Development and readable text in Development.
 
 **CORS in other environments.** `Cors:AllowedOrigins` has no built-in default in code, so configured origins replace the development ones rather than adding to them. In production, set your real origin(s), for example `Cors__AllowedOrigins__0=https://shop.example.com`. Development (`appsettings.Development.json`) also allows `http://127.0.0.1:5173`. Swagger is not mapped outside Development.
 
@@ -428,12 +433,14 @@ Any extra fields the client sends (such as `unitPrice`) are ignored; the server 
 
 | Situation | What the user sees |
 |---|---|
-| API or FakeStoreAPI down on first load | An error panel with the reason and **Try again**. Filters still render (fallback categories). |
+| API or FakeStoreAPI down on first load | An error panel with the reason in shopper terms, a **Reference** for 5xx, and **Try again**. Filters still render (fallback categories). |
+| FakeStoreAPI down after the catalogue loaded once | Products show from the API's saved copy (up to 60 minutes old) with a notice and **Refresh**. Checkout still fails closed. |
+| Browser offline | A banner says so; checkout sends nothing and says the order hasn't been sent; the catalogue reloads once on reconnect if the last load failed. |
 | Failure while refining a search | The previous results stay, with an inline alert and **Try again**. |
 | Corrupt, unknown-version or partly invalid saved cart | Invalid data is discarded or repaired, a notice is shown, and the app never crashes. |
-| Checkout network error, 5xx, timeout or unreadable response | "We couldn't confirm whether your order went through." The cart is kept and **Try again** resubmits with the same `Idempotency-Key`: if the first attempt did reach the server, that order is shown (with a note that it wasn't placed twice) instead of a second one being created. Nothing is resubmitted automatically. |
+| Checkout network error, 5xx, timeout or unreadable response | "We couldn't confirm whether your order went through." The cart is kept and **Try again** resubmits with the same `Idempotency-Key`: if the first attempt did reach the server, that order is shown (with a note that it wasn't placed twice) instead of a second one being created. The key stays pinned across a reload and even if the details change, until the server confirms an order or reports the key reused. Nothing is resubmitted automatically. |
 | 429 rate limited | "Too many requests. Wait N seconds" (from `Retry-After`); the cart is kept. |
-| 413 request too large / 503 database busy | A plain explanation; 503 offers **Try again**. |
+| 413 request too large / 503 database busy or unavailable | A plain explanation and **Try again**. On checkout the API only sends these 503s when COMMIT was never attempted, so nothing was saved; a failed COMMIT is a 500 and shows the "couldn't confirm" message. A 503 is **not** a no-change guarantee on account endpoints: after a registration error the shopper is told to try signing in first. |
 | Signed-in token expired during checkout | Renewed once and the same order resent. If the session can't be renewed: "Your session expired, so this order hasn't been placed", with **Sign in again** or **Place order as a guest**. |
 | 422 idempotency key reused | "An earlier attempt at this order may already have been placed. Check before placing it again." A new key is used for the next attempt. |
 | Saved session rejected on load, or orders return 401 | The session is renewed once; if that fails the shopper is signed out with a notice. Nothing redirects, so there's no loop. |
@@ -454,15 +461,17 @@ Responsive: layouts were checked at 320, 375, 768, 1024 and 1440 px wide with no
 **CORS error in the browser console** ("No 'Access-Control-Allow-Origin' header").
 - The frontend must run on exactly `http://localhost:5173` (Vite is set to `strictPort`). If you use another origin, such as `127.0.0.1` or a different port, add it to `Cors:AllowedOrigins`. Development already allows `127.0.0.1:5173`.
 - Make sure `VITE_API_BASE_URL` matches the API URL exactly (`http`, not `https`), then restart `npm run dev` after editing `.env.local`.
-- A CORS error can also hide a crashed or stopped API. Check that `http://localhost:5080/health` loads.
+- A CORS error can also hide a crashed or stopped API. Check that `http://localhost:5080/health/live` loads.
 
-**"We couldn't load the catalogue" or 502/504 from the API.**
+**"We couldn't load the catalogue", a "recently saved copy" notice, or 502/504 from the API.**
 - FakeStoreAPI is occasionally slow or down. Try `curl https://fakestoreapi.com/products`. Raise `FakeStore:TimeoutSeconds` if your network is slow, or run `tools/fakestore_mock.py` and point `FakeStore__BaseUrl` at it.
 - Behind a corporate proxy, set `HTTPS_PROXY` for the API process.
 
 **Database errors.**
 - `SQLite Error 1: 'no such table: Orders'` (500 `DATABASE_ERROR`): migrations haven't run, which happens outside Development. Run `dotnet ef database update --project Storefront.Api` from `backend/`.
 - 503 `DATABASE_BUSY`: another process (often a SQLite viewer holding a write transaction) has the file locked. Close it and retry.
+- 503 `DATABASE_UNAVAILABLE`: the SQLite file can't be opened (missing folder, permissions or disk). `/health/ready` also reports 503.
+- A shopper quoted a **Reference**: search the API log for it (`Documentation/Availability.md`, section 5).
 - To start over, stop the API and delete `backend/Storefront.Api/App_Data/storefront.db`.
 
 **Signed out unexpectedly, or "Your session has expired".** Sessions last for the browser tab; closing the tab signs you out. Restarting the API keeps sessions only if its Data Protection keys survive (they do by default on a developer machine).
@@ -483,7 +492,21 @@ Responsive: layouts were checked at 320, 375, 768, 1024 and 1440 px wide with no
 
 ## 9. Verification status
 
-**Current version (testing and QA pass).** Verified on 23 October 2026 in a Linux workspace (.NET SDK 10.0.401, Node 22.22.0, Chromium 141 with Playwright 1.64.0). Details, coverage and exclusions are in `Documentation/Testing.md`.
+**Current version (live availability pass).** Verified on 23 October 2026 in a Linux workspace (same tools as below). These are test results, not uptime evidence: nothing has been deployed. Details are in `Documentation/Availability.md` and `Documentation/Testing.md`.
+
+| Check | Result |
+|---|---|
+| Backend `dotnet build -c Release` (0 warnings), `dotnet test -c Release` | **Passed: 255 of 255** (unit 132, database 28, API 95), 0 skipped. Coverage 96.1% of lines (1257/1308) and 88.7% of branches (515/580), measured before the last added test |
+| Frontend `npm run typecheck`, `npm run build`, `npm run test:coverage` | **Passed: 260 of 260** (unit 181, component 79), 0 skipped. Coverage 96.3% of lines (1044/1084) and 90.06% of branches (879/976); thresholds met |
+| Browser `npm run test:e2e` | **Passed: 18 of 18**, including the outage, offline and 320 px/axe availability checks |
+| `tools/smoke_test.py --mock` | **Passed: 70 of 70**, 0 skipped |
+| Deliberate breakages | Disabling the reconnect reload and offline-checkout guard made 3 frontend tests fail; restoring the old single-step checkout save made 4 backend tests fail (a committed order was reported as "not saved"); turning off the error-response log line made 8 fail |
+| Production-mode manual run | JSON log lines with `CorrelationId`; SIGTERM logged stopping and stopped, and the port closed |
+| Owner's Windows machine for this version | **Passed** (23 October 2026, reported by the owner): `dotnet test -c Release`, `npm run test:coverage`, `npm run test:e2e`, after two test-only fixes the first run exposed: a culture-dependent JSON helper and a too-short component test timeout (see `Documentation/Testing.md`) |
+
+**Previous version (testing and QA pass).**
+
+Verified on 23 October 2026 in a Linux workspace (.NET SDK 10.0.401, Node 22.22.0, Chromium 141 with Playwright 1.64.0). Details, coverage and exclusions are in `Documentation/Testing.md`.
 
 | Check | Result |
 |---|---|
@@ -528,8 +551,9 @@ The audit of the previous version is in `Documentation/Audits/AUDIT.md`.
 ### Known limitations and risks
 
 - **Pricing rules fallback.** If `/api/store/config` fails at page load, the cart uses built-in defaults. If the server is configured differently, every checkout returns 409 until the page is reloaded.
-- **Catalogue cache.** Prices are authoritative as of the last fetch (5 minutes by default). When the cache expires during an outage, the store fails closed (502) rather than serving stale prices. Concurrent cold-cache requests each call FakeStoreAPI (no single-flight).
-- No retry or circuit breaker on upstream calls (`Microsoft.Extensions.Http.Resilience` would be the next step).
+- **Catalogue cache.** Checkout prices are authoritative as of the last fetch (5 minutes by default). During an outage, browsing shows the last good copy (up to 60 minutes old, marked as such) but checkout fails closed (502) rather than pricing from it. The saved copy is in memory and lost on restart.
+- Upstream GETs are retried (bounded, with backoff) but there is no circuit breaker. See `Documentation/Availability.md` for the full list of availability limitations.
+- No high-availability or uptime claim: one process, one SQLite file, no deployment or monitoring evidence.
 - The cart is per browser and not saved to the account, so it doesn't follow a shopper to another device.
 - Signing out forgets the tokens in the browser, but Identity's bearer tokens can't be revoked server-side; an access token stays valid until it expires (1 hour).
 - The refresh token is in sessionStorage, which script on the page could read if an XSS bug were introduced; see `Documentation/Frontend.md` for the trade-off.

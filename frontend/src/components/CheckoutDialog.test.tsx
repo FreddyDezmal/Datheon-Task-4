@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { AppProviders, Storefront } from '../App';
@@ -15,6 +15,7 @@ import {
   unauthorized,
 } from '../test/fixtures';
 import { CART_STORAGE_KEY } from '../utils/cartStorage';
+import { PENDING_CHECKOUT_KEY } from '../utils/pendingCheckout';
 
 const seedCart = (unitPriceMinor = 2230, quantity = 1) =>
   window.localStorage.setItem(
@@ -126,13 +127,14 @@ describe('checkout', () => {
     expect(keys[1]).toBe(keys[0]);
   });
 
-  it('uses a new idempotency key when the order changes between attempts', async () => {
+  it('uses a new idempotency key when the order changes after a definite failure', async () => {
     seedCart(2230, 1);
     const keys: (string | null)[] = [];
     mockApi({
       checkout: (_url, init) => {
         keys.push(new Headers(init?.headers).get('Idempotency-Key'));
-        throw new TypeError('Failed to fetch');
+        // Nothing was saved (the API only sends this before COMMIT), so a changed order is a new order.
+        return problem(503, 'DATABASE_UNAVAILABLE', { title: "The store's database is unavailable." });
       },
     });
     const { user, dialog } = await openCheckout();
@@ -145,6 +147,60 @@ describe('checkout', () => {
     await waitFor(() => expect(keys).toHaveLength(2));
 
     expect(keys[1]).not.toBe(keys[0]);
+    expect(window.sessionStorage.getItem(PENDING_CHECKOUT_KEY)).toBeNull();
+  });
+
+  it('keeps the original idempotency key after an uncertain outcome, even if the details change', async () => {
+    seedCart(2230, 1);
+    const keys: (string | null)[] = [];
+    mockApi({
+      checkout: (_url, init) => {
+        keys.push(new Headers(init?.headers).get('Idempotency-Key'));
+        throw new TypeError('Failed to fetch'); // the first attempt may have been saved
+      },
+    });
+    const { user, dialog } = await openCheckout();
+
+    await fillAndSubmit(user, dialog);
+    await within(dialog).findByRole('alert');
+    await user.clear(within(dialog).getByLabelText('Full name'));
+    await user.type(within(dialog).getByLabelText('Full name'), 'Grace Hopper');
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(keys).toHaveLength(2));
+
+    // A new key here could place a second order; the same key lets the server reconcile:
+    // replay if it was saved as sent, 422 if it was saved with other details, a new order if not saved.
+    expect(keys[1]).toBe(keys[0]);
+    expect(window.sessionStorage.getItem(PENDING_CHECKOUT_KEY)).toBe(keys[0]);
+  });
+
+  it('reuses the pending key after a reload, and forgets it once the order is confirmed', async () => {
+    seedCart(2230, 1);
+    const keys: (string | null)[] = [];
+    let fail = true;
+    mockApi({
+      checkout: (_url, init) => {
+        keys.push(new Headers(init?.headers).get('Idempotency-Key'));
+        if (fail) throw new TypeError('Failed to fetch');
+        return new Response(JSON.stringify(confirmation), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', 'Idempotent-Replayed': 'true' },
+        });
+      },
+    });
+    const first = await openCheckout();
+    await fillAndSubmit(first.user, first.dialog);
+    await within(first.dialog).findByRole('alert');
+
+    cleanup(); // the shopper reloads the page; sessionStorage and the cart survive
+    fail = false;
+    const second = await openCheckout();
+    await fillAndSubmit(second.user, second.dialog);
+    await screen.findByRole('heading', { name: 'Order placed' });
+
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+    expect(window.sessionStorage.getItem(PENDING_CHECKOUT_KEY)).toBeNull();
   });
 
   it('re-prices the cart from the server quote when prices changed, and asks the user to confirm', async () => {
@@ -245,6 +301,33 @@ describe('checkout', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Wait 12 seconds and try again. Your cart is saved.');
     expect(within(dialog).getByRole('button', { name: 'Try again' })).toBeEnabled();
     expect(badge()).toHaveTextContent('1');
+  });
+
+  it('releases a pinned key only when the server says it belongs to a different order', async () => {
+    seedCart();
+    const keys: (string | null)[] = [];
+    mockApi({
+      checkout: (_url, init) => {
+        keys.push(new Headers(init?.headers).get('Idempotency-Key'));
+        if (keys.length === 1) throw new TypeError('Failed to fetch'); // uncertain: key pinned
+        if (keys.length === 2) return problem(422, 'IDEMPOTENCY_KEY_REUSED', { title: 'Already used.' }); // it WAS saved, as another order
+        return jsonResponse(confirmation);
+      },
+    });
+    const { user, dialog } = await openCheckout();
+    await fillAndSubmit(user, dialog);
+    await within(dialog).findByRole('alert');
+    await user.clear(within(dialog).getByLabelText('Full name'));
+    await user.type(within(dialog).getByLabelText('Full name'), 'Grace Hopper');
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('may already have been placed');
+    expect(window.sessionStorage.getItem(PENDING_CHECKOUT_KEY)).toBeNull();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Place demo order' }));
+    await screen.findByRole('heading', { name: 'Order placed' });
+
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
   });
 
   it('warns about a possible earlier order when the server reports the key was reused, then starts a new key', async () => {

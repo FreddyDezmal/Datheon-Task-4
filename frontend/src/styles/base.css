@@ -314,3 +314,20 @@ button {
     translate: 0 8px;
   }
 }
+
+/* "Reference: …" under server-side failures */
+.error-reference {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.error-reference code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  user-select: all;
+}
+
+.alert .error-reference {
+  flex-basis: 100%;
+  color: inherit;
+}

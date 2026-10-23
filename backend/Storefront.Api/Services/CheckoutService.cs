@@ -81,15 +81,21 @@ public sealed class CheckoutService(
         var order = CreateOrder(request, caller, fingerprint, breakdown);
         for (var attempt = 1; ; attempt++)
         {
+            // The write runs in an explicit transaction so the commit is a separate, known step:
+            //  - a failure while opening, beginning or inserting happens before COMMIT is ever sent,
+            //    so nothing from this request can be saved (the transaction is rolled back on dispose).
+            //    Those failures surface as-is: DATABASE_UNAVAILABLE / DATABASE_BUSY are definite.
+            //  - a failure during COMMIT could have happened after the data became durable, so it is
+            //    reported as an unknown outcome; the caller must retry with the same Idempotency-Key.
             db.Orders.Add(order);
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             try
             {
-                // One SaveChanges = one transaction: the order and all its lines are saved, or none are.
                 await db.SaveChangesAsync(cancellationToken);
-                break;
             }
             catch (DbUpdateException ex) when (DatabaseErrors.IsUniqueViolation(ex))
             {
+                await transaction.RollbackAsync(CancellationToken.None);
                 db.ChangeTracker.Clear();
 
                 // A concurrent request with the same Idempotency-Key won the race: return its order.
@@ -105,7 +111,20 @@ public sealed class CheckoutService(
                 }
 
                 order = CreateOrder(request, caller, fingerprint, breakdown);
+                continue;
             }
+
+            try
+            {
+                // Once COMMIT is sent it is not cancelled: an abandoned request must not interrupt it halfway.
+                await transaction.CommitAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                throw new OrderOutcomeUnknownException(ex);
+            }
+
+            break;
         }
 
         logger.LogInformation(

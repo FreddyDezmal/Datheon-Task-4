@@ -15,6 +15,10 @@ public sealed class CategoriesController(IProductCatalogService catalogService) 
     [HttpGet]
     [ProducesResponseType<IReadOnlyList<CategoryDto>>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status502BadGateway)]
-    public async Task<ActionResult<IReadOnlyList<CategoryDto>>> GetCategories(CancellationToken cancellationToken) =>
-        Ok(await catalogService.GetCategoriesAsync(cancellationToken));
+    public async Task<ActionResult<IReadOnlyList<CategoryDto>>> GetCategories(CancellationToken cancellationToken)
+    {
+        var categories = await catalogService.GetCategoriesAsync(cancellationToken);
+        ProductsController.MarkIfStale(Response, catalogService);
+        return Ok(categories);
+    }
 }

@@ -89,7 +89,37 @@ All report folders are git-ignored.
 
 ---
 
-## 3. Results on 23 October 2026
+## 3a. Availability safeguards (23 October 2026, live availability pass)
+
+Run in the same Linux workspace. These results show the safeguards behave as designed; they are not evidence of uptime.
+
+| Suite | Before | After | Passed | Failed | Skipped |
+|---|---|---|---|---|---|
+| Backend xUnit | 190 | **255** (unit 132, database 28, API 95) | 255 | 0 | 0 |
+| Frontend Vitest | 230 | **260 in 23 files** (unit 181, component 79) | 260 | 0 | 0 |
+| Browser (Playwright) | 16 | **18** (outage journey rewritten, offline journey added, 320 px plus axe check of outage and offline states) | 18 | 0 | 0 |
+| API smoke (mock) | 59 | **70** (health, correlation IDs, stale browsing, readiness Degraded and recovery) | 70 | 0 | 0 |
+
+| Coverage | After |
+|---|---|
+| Backend lines / branches / methods | **96.1%** (1257/1308) / **88.7%** (515/580) / **96.7%** (504/521) |
+| Frontend lines / statements / branches / functions | **96.3%** (1044/1084) / **94.31%** (1212/1285) / **90.06%** (879/976) / **94.24%** (344/365) |
+
+- **Timeout (found on the owner's Windows machine).** The two-checkout reload test took 5.09 s there against Vitest's 5 s default (the whole run took 135 s, against about 50 s here), so it was timed out rather than failing an assertion. The component project now allows 20 s per test; unit tests keep 5 s.
+- **Culture (found on the owner's Windows machine).** 3 `CorrelationIdTests` cases failed there because a test helper wrote `expectedTotal` with the machine's decimal separator (`1,00`), which is invalid JSON. The API was not at fault: it runs with `InvariantGlobalization`. The helper now formats with the invariant culture. Reproduced and re-verified under de-DE: backend 255/255 (3 failures before the fix) and Vitest 260/260.
+- **Changed assertions (second review).** The old test "uses a new idempotency key when the order changes between attempts" changed the details after a *network failure* and expected a new key, which is the behaviour that could place a second order. It is now two tests: after a definite failure (503 `DATABASE_UNAVAILABLE`) a changed order gets a new key; after an uncertain one the original key is kept. New tests also cover the key surviving a reload and being released only on confirmation or 422. Disabling the pinning made those 3 tests fail. The registration-outage test now also covers 503 and a lost response.
+- **Changed assertions.** One existing frontend assertion matched the old network-error wording ("Could not reach the store"), which this pass replaced. It now matches the new wording and is just as specific. Two older journeys assumed an outage blanks the catalogue; they now assert the saved copy and notice, and that checkout still fails safely.
+- **Mutation checks:**
+  - Disabling the reconnect reload and the offline-checkout guard made 3 tests fail; restored, all pass.
+  - Restoring the old single-step save made 4 `CheckoutOutcomeTests` cases fail. In those, a committed order was reported as 503 `DATABASE_UNAVAILABLE` / `DATABASE_BUSY`.
+  - Turning off the error-response log line made 8 `CorrelationIdTests` fail; letting it log a second time after the exception handler made 5 fail.
+- **Follow-up review** (owner's three checks before committing): checkout's write was split so a failure is definite only when COMMIT was never sent; errors answered without an exception now get one log line; there are new tests for losing the database while running and for liveness during pending migrations.
+- **Coverage gaps:** `CorrelationIdMiddleware.CorrelationScope` is 37.5% covered, because tests log as text and only `ToString` runs. Its structured form was checked by hand: a Production-mode run wrote JSON lines with a `CorrelationId` field. `DatabaseHealthCheck` is 75% covered; its catch block isn't reached, because EF's `CanConnectAsync` returns false for an unopenable file instead of throwing.
+- **Owner's Windows machine:** `dotnet test -c Release`, `npm run test:coverage` and `npm run test:e2e` all passed (23 October 2026, reported by the owner) after the two test-only fixes above.
+
+---
+
+## 3. Results on 23 October 2026 (testing and QA pass)
 
 Measured in a Linux workspace: .NET SDK 10.0.401, Node 22.22.0, Chromium 141 (headless) with Playwright 1.64.0. The same commands (backend tests, `npm ci`, `npm test`, `npm run test:coverage` and `npm run test:e2e`) were then run on the owner's Windows machine on 23 October 2026 and all passed.
 

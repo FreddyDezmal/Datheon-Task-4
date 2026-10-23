@@ -7,9 +7,12 @@ import type { ApiError } from '../services/apiClient';
  *
  * Only a retry with the same Idempotency-Key is safe after these. Failures the server reports
  * before saving anything (validation, price change, unavailable products, an outage of the
- * product catalogue, a busy database) are not uncertain.
+ * product catalogue, a busy or unavailable database) are not uncertain.
  */
+/** 5xx codes the API only returns before anything is written (the order transaction never committed). */
+const DEFINITE_SERVER_FAILURES = new Set<string>(['DATABASE_BUSY', 'DATABASE_UNAVAILABLE']);
+
 export function isUncertainOutcome(error: ApiError): boolean {
   if (error.code === 'NETWORK_ERROR' || error.code === 'TIMEOUT' || error.code === 'INVALID_RESPONSE') return true;
-  return error.status >= 500 && !error.code.startsWith('UPSTREAM_') && error.code !== 'DATABASE_BUSY';
+  return error.status >= 500 && !error.code.startsWith('UPSTREAM_') && !DEFINITE_SERVER_FAILURES.has(error.code);
 }

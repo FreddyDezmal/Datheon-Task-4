@@ -141,7 +141,7 @@ describe('signing in and creating an account', () => {
       }),
       /Wait 42 seconds/,
     ],
-    ['an unreachable API', () => Promise.reject(new TypeError('Failed to fetch')), /Could not reach the store/],
+    ['an unreachable API', () => Promise.reject(new TypeError('Failed to fetch')), /We couldn't reach the store/],
   ])('explains %s without signing in', async (_case, respond, message) => {
     mockApi({ routes: { '/api/account/login': respond as () => Response } });
     const { user } = renderApp();

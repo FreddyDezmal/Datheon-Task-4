@@ -3,6 +3,7 @@ import { AccountDialog } from './components/AccountDialog';
 import { CartDrawer } from './components/CartDrawer';
 import { CheckoutDialog } from './components/CheckoutDialog';
 import { Navbar } from './components/Navbar';
+import { OfflineBanner } from './components/OfflineBanner';
 import { ProductDetailsDialog } from './components/ProductDetailsDialog';
 import { SEARCH_DEBOUNCE_MS } from './config/env';
 import { CartProvider, useCart } from './context/CartContext';
@@ -121,6 +122,7 @@ export function Storefront() {
           onAccountOpen={openAccount}
           onBrandClick={reset}
         />
+        <OfflineBanner />
         <main id="main" className="page" tabIndex={-1}>
           <CatalogPage
             query={fetchQuery}

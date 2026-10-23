@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using Storefront.Api.Configuration;
 using Storefront.Api.Data;
 using Storefront.Api.Data.Entities;
+using Storefront.Api.Health;
 using Storefront.Api.Middleware;
 using Storefront.Api.Security;
 using Storefront.Api.Services;
@@ -30,6 +31,14 @@ var corsSettings = builder.Configuration.GetSection(CorsSettings.SectionName).Ge
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddMemoryCache();
 builder.Services.AddStorefrontDatabase(builder.Configuration, builder.Environment);
+builder.Services.AddSingleton<CatalogueState>();
+builder.Services.AddTransient<UpstreamRetryHandler>();
+builder.Services.AddStorefrontHealthChecks();
+
+// On shutdown (Ctrl+C, SIGTERM, a service manager stopping the app) Kestrel stops accepting new
+// connections, readiness turns 503, and in-flight requests get this long to finish.
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(
+    builder.Configuration.GetValue("Hosting:ShutdownTimeoutSeconds", 30)));
 
 builder.Services.AddHttpClient<IFakeStoreClient, FakeStoreClient>((services, client) =>
 {
@@ -38,7 +47,9 @@ builder.Services.AddHttpClient<IFakeStoreClient, FakeStoreClient>((services, cli
     client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
     client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
     client.DefaultRequestHeaders.UserAgent.ParseAdd("Storefront.Api/1.0");
-});
+})
+    // Bounded retries for transient upstream failures (GET only), inside the HttpClient.Timeout budget.
+    .AddHttpMessageHandler<UpstreamRetryHandler>();
 
 // ---- Security ----
 builder.Services.AddStorefrontAuthentication();
@@ -87,8 +98,10 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddCors(options => options.AddPolicy(CorsSettings.PolicyName, policy => policy
     .WithOrigins(corsSettings.AllowedOrigins)
     .WithMethods("GET", "POST")
-    .WithHeaders("Content-Type", "Accept", "Authorization", IdempotencyKeys.HeaderName)
-    .WithExposedHeaders(IdempotencyKeys.ReplayedHeaderName, "Retry-After")));
+    .WithHeaders("Content-Type", "Accept", "Authorization", IdempotencyKeys.HeaderName, CorrelationIdMiddleware.HeaderName)
+    .WithExposedHeaders(
+        IdempotencyKeys.ReplayedHeaderName, "Retry-After", CorrelationIdMiddleware.HeaderName,
+        Storefront.Api.Controllers.ProductsController.StaleHeader)));
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -102,6 +115,16 @@ if (corsSettings.AllowedOrigins.Length == 0)
 
 await app.ApplyMigrationsIfConfiguredAsync();
 
+app.Lifetime.ApplicationStarted.Register(() => app.Logger.LogInformation(
+    "Storefront API started in {Environment}; catalogue source {CatalogueHost}.",
+    app.Environment.EnvironmentName,
+    new Uri(app.Services.GetRequiredService<IOptions<FakeStoreOptions>>().Value.BaseUrl).Host));
+app.Lifetime.ApplicationStopping.Register(() => app.Logger.LogInformation(
+    "Storefront API stopping: readiness now reports unavailable; finishing in-flight requests."));
+app.Lifetime.ApplicationStopped.Register(() => app.Logger.LogInformation("Storefront API stopped."));
+
+// First, so every later log line (including unhandled-exception logs) carries the request's ID.
+app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 app.UseMiddleware<SecurityHeadersMiddleware>();
@@ -128,7 +151,7 @@ app.MapGroup("/api/account")
     .WithTags("Account")
     .MapIdentityApi<StorefrontUser>()
     .RequireRateLimiting(RateLimitPolicies.Account);
-app.MapGet("/health", () => Results.Ok(new { status = "ok" })).ExcludeFromDescription();
+app.MapStorefrontHealthChecks();
 
 app.Run();
 

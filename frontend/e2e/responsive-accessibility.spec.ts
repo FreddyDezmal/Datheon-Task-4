@@ -169,3 +169,35 @@ test('reduced motion turns transitions off', async ({ page }) => {
   const duration = await page.getByRole('dialog', { name: /Your cart/ }).evaluate((el) => getComputedStyle(el).transitionDuration);
   expect(duration.split(',').every((d) => parseFloat(d) === 0)).toBe(true);
 });
+
+test('outage and offline notices fit a 320px screen and pass the axe scan', async ({ page, context, request }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await openFreshStore(page);
+  await addToCart(page, PRODUCTS.shirt.title);
+  const found: Record<string, string[]> = {};
+
+  // FakeStoreAPI down: the catalogue is served from the API's saved copy with a notice.
+  await setUpstream(request, '500');
+  await page.reload();
+  await expect(page.getByText('recently saved copy')).toBeVisible();
+  found.staleCatalogue = [...(await layoutProblems(page)), ...(await scan(page))];
+
+  // Checkout during the outage: a definite failure with a reference.
+  await cartButton(page).click();
+  await page.getByRole('button', { name: 'Check out' }).click();
+  const checkout = page.getByRole('dialog', { name: 'Check out' });
+  await checkout.getByLabel('Full name').fill('Ada Lovelace');
+  await checkout.getByLabel('Email').fill('ada@example.test');
+  await checkout.getByRole('button', { name: 'Place demo order' }).click();
+  await expect(checkout.getByText(/Reference:/)).toBeVisible();
+  found.checkoutOutage = [...(await layoutProblems(page)), ...(await scan(page))];
+  await checkout.getByRole('button', { name: 'Close checkout' }).click();
+  await setUpstream(request, 'ok');
+
+  await context.setOffline(true);
+  await expect(page.getByText("You're offline.")).toBeVisible();
+  found.offline = [...(await layoutProblems(page)), ...(await scan(page))];
+  await context.setOffline(false);
+
+  expect(found).toEqual({ staleCatalogue: [], checkoutOutage: [], offline: [] });
+});

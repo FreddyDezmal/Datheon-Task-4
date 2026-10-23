@@ -301,3 +301,23 @@
     padding-top: var(--space-5);
   }
 }
+
+/* ---------- Offline banner ---------- */
+
+.offline-banner:empty {
+  display: none;
+}
+
+.offline-banner {
+  background: var(--color-info-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-info) 25%, transparent);
+  color: var(--color-info);
+}
+
+.offline-banner__text {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}

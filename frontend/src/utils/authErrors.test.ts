@@ -41,11 +41,16 @@ describe('describeAuthError', () => {
     expect(describeAuthError(locked, 'sign-in').form).toMatch(/locked/);
   });
 
-  it('warns that a server error during registration may or may not have created the account', () => {
-    const outage = new ApiError('The store is having a problem right now.', 500, 'HTTP_500');
+  it.each([
+    ['a server error', new ApiError('The store is having a problem right now.', 500, 'HTTP_500')],
+    ['an unavailable database (503 is not a guarantee for accounts)', new ApiError("The store's database is unavailable.", 503, 'DATABASE_UNAVAILABLE')],
+    ['a lost response', new ApiError("We couldn't reach the store.", 0, 'NETWORK_ERROR')],
+  ])('after %s during registration, says the account may exist and to try signing in first', (_case, outage) => {
+    const form = describeAuthError(outage, 'register').form;
 
-    expect(describeAuthError(outage, 'register').form).toMatch(/may not have been created/);
-    expect(describeAuthError(outage, 'sign-in').form).toBe('The store is having a problem right now.');
+    expect(form).toContain(outage.message);
+    expect(form).toMatch(/couldn't confirm whether your account was created\. Try signing in first/);
+    expect(describeAuthError(outage, 'sign-in').form).toBe(outage.message);
   });
 
   it('passes through rate-limit and network messages and handles non-API errors', () => {

@@ -39,6 +39,15 @@ export function describeAuthError(error: unknown, mode: AuthMode): AuthErrors {
     return result;
   }
 
+  // Registration is not idempotent: after a server error or a lost response (including 503s) the
+  // account may or may not exist. Repeating it is recoverable (a duplicate email is rejected), but the
+  // shopper should try signing in first rather than be told nothing was saved.
+  if (mode === 'register' && (error.status >= 500 || error.status === 0)) {
+    return {
+      form: `${error.message} We couldn't confirm whether your account was created. Try signing in first; if that doesn't work, create the account again.`,
+    };
+  }
+
   // Rate limiting, network failures and outages: the client's message already says what to do.
-  return { form: mode === 'register' && error.status >= 500 ? `${error.message} Your account may not have been created.` : error.message };
+  return { form: error.message };
 }

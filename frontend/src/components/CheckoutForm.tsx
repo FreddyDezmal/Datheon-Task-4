@@ -150,6 +150,11 @@ export function CheckoutForm({
           role="alert"
         >
           <p>{problem.message}</p>
+          {problem.reference && (
+            <p className="error-reference">
+              Reference: <code>{problem.reference}</code>
+            </p>
+          )}
           {problem.kind === 'unavailable' && (
             <button type="button" className="button button--secondary" onClick={onRemoveUnavailable}>
               Remove unavailable items

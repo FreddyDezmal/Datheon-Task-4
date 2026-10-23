@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Storefront.Api.Services;
 using Storefront.Api.Tests.TestSupport;
 
@@ -18,10 +19,18 @@ namespace Storefront.Api.Tests.Integration;
 public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
 {
     private readonly bool _deleteDatabaseOnDispose;
+    private readonly Action<IServiceCollection>? _configureServices;
 
-    public StorefrontApiFactory(string? databasePath = null, int accountPermitLimit = 1000, TimeProvider? timeProvider = null)
+    public StorefrontApiFactory(
+        string? databasePath = null,
+        int accountPermitLimit = 1000,
+        TimeProvider? timeProvider = null,
+        IReadOnlyDictionary<string, string?>? settings = null,
+        Action<IServiceCollection>? configureServices = null)
     {
+        _configureServices = configureServices;
         Time = timeProvider;
+        Settings = settings ?? new Dictionary<string, string?>();
         DatabasePath = databasePath ?? Path.Combine(Path.GetTempPath(), $"storefront-api-test-{Guid.NewGuid():N}.db");
         _deleteDatabaseOnDispose = databasePath is null;
         AccountPermitLimit = accountPermitLimit;
@@ -34,6 +43,12 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
     /// <summary>When set, replaces the system clock for the whole app, including token expiry.</summary>
     internal TimeProvider? Time { get; }
 
+    /// <summary>Configuration overrides applied after the defaults (e.g. a broken connection string).</summary>
+    public IReadOnlyDictionary<string, string?> Settings { get; }
+
+    /// <summary>Everything the app logged while the test ran.</summary>
+    public CapturingLoggerProvider Logs { get; } = new();
+
     internal InMemoryFakeStoreClient Catalogue { get; } = new(TestData.Catalogue());
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -42,6 +57,12 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("ConnectionStrings:Storefront", $"Data Source={DatabasePath}");
         builder.UseSetting("RateLimiting:AccountPermitLimit", AccountPermitLimit.ToString());
         builder.UseSetting("RateLimiting:CheckoutPermitLimit", "1000");
+        foreach (var (key, value) in Settings)
+        {
+            builder.UseSetting(key, value);
+        }
+
+        builder.ConfigureLogging(logging => logging.AddProvider(Logs));
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IFakeStoreClient>();
@@ -51,6 +72,8 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
                 services.RemoveAll<TimeProvider>();
                 services.AddSingleton(Time);
             }
+
+            _configureServices?.Invoke(services);
         });
     }
 

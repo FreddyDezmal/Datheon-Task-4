@@ -27,6 +27,7 @@ export type ApiErrorCode =
   | 'TOO_MANY_REQUESTS'
   | 'IDEMPOTENCY_KEY_REUSED'
   | 'DATABASE_BUSY'
+  | 'DATABASE_UNAVAILABLE'
   | (string & {});
 
 export class ApiError extends Error {
@@ -35,6 +36,11 @@ export class ApiError extends Error {
   readonly problem: ProblemDetails | null;
   /** From the Retry-After header (429 and some 503 responses), when the server sent one. */
   readonly retryAfterSeconds: number | null;
+  /**
+   * The request's correlation ID (X-Correlation-Id / problem traceId), when the server answered.
+   * Safe to show: it identifies the request in the server's logs and reveals nothing else.
+   */
+  readonly reference: string | null;
 
   constructor(
     message: string,
@@ -42,6 +48,7 @@ export class ApiError extends Error {
     code: ApiErrorCode,
     problem: ProblemDetails | null = null,
     retryAfterSeconds: number | null = null,
+    reference: string | null = null,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -49,6 +56,7 @@ export class ApiError extends Error {
     this.code = code;
     this.problem = problem;
     this.retryAfterSeconds = retryAfterSeconds;
+    this.reference = reference;
   }
 
   /** True when retrying the same request might succeed. */
@@ -56,6 +64,13 @@ export class ApiError extends Error {
     return this.status === 0 || this.status === 408 || this.status === 429 || this.status >= 500;
   }
 }
+
+export const CORRELATION_ID_HEADER = 'X-Correlation-Id';
+/** Set by the API when browsing data came from its last good copy because FakeStoreAPI was unreachable. */
+export const CATALOGUE_STALE_HEADER = 'Catalogue-Stale';
+
+/** False only when the browser knows it has no connection (navigator.onLine can't prove the opposite). */
+export const isBrowserOffline = (): boolean => typeof navigator !== 'undefined' && navigator.onLine === false;
 
 export const isAbortError = (error: unknown): boolean =>
   error instanceof DOMException && error.name === 'AbortError';
@@ -103,9 +118,15 @@ export async function apiRequest<T>(
     if (body !== undefined) init.body = JSON.stringify(body);
     response = await fetch(`${API_BASE_URL}${path}`, init);
   } catch (error) {
-    if (timedOut) throw new ApiError('The store took too long to respond.', 0, 'TIMEOUT');
+    if (timedOut) throw new ApiError('The store is taking too long to respond.', 0, 'TIMEOUT');
     if (signal?.aborted || isAbortError(error)) throw error;
-    throw new ApiError('Could not reach the store. Check that the API is running and try again.', 0, 'NETWORK_ERROR');
+    throw new ApiError(
+      isBrowserOffline()
+        ? "You're offline. Check your internet connection."
+        : "We couldn't reach the store. Check your connection, or try again in a moment.",
+      0,
+      'NETWORK_ERROR',
+    );
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', forwardAbort);
@@ -122,6 +143,7 @@ export async function apiRequest<T>(
       problem?.code ?? `HTTP_${response.status}`,
       problem,
       retryAfter,
+      readReference(response, problem),
     );
   }
 
@@ -129,7 +151,14 @@ export async function apiRequest<T>(
   try {
     return parse(data);
   } catch {
-    throw new ApiError('The store sent an unexpected response.', response.status, 'INVALID_RESPONSE');
+    throw new ApiError(
+      'The store sent an unexpected response.',
+      response.status,
+      'INVALID_RESPONSE',
+      null,
+      null,
+      readReference(response, null),
+    );
   }
 }
 
@@ -148,6 +177,15 @@ function describeFailure(status: number, problem: ProblemDetails | null, retryAf
   if (text) return text;
   if (status >= 500) return 'The store is having a problem right now. Try again in a moment.';
   return `Request failed with status ${status}.`;
+}
+
+const REFERENCE_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+
+/** The correlation ID, if it looks like one (never echo arbitrary text from a response into the UI). */
+function readReference(response: Response, problem: ProblemDetails | null): string | null {
+  const candidates = [response.headers.get(CORRELATION_ID_HEADER), problem?.traceId];
+  const found = candidates.find((v): v is string => typeof v === 'string' && REFERENCE_PATTERN.test(v));
+  return found ?? null;
 }
 
 /** Retry-After is either delta-seconds or an HTTP date. */

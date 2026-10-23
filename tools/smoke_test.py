@@ -2,8 +2,10 @@
 """
 End-to-end smoke test for the running Storefront API (Python 3.9+, standard library only).
 
-Exercises every endpoint, the checkout repricing rules, validation, CORS and Swagger.
-When pointed at tools/fakestore_mock.py (--mock) it also drives upstream failure modes.
+Exercises every endpoint, the checkout repricing rules, validation, CORS, Swagger, the health
+endpoints and correlation IDs. When pointed at tools/fakestore_mock.py (--mock) it also drives
+upstream failure modes: browsing falls back to the last good catalogue (Catalogue-Stale: true)
+while checkout fails closed.
 
 Usage
   # This script sends a few hundred checkouts, far above the API's normal rate limits, so start
@@ -108,6 +110,21 @@ def main() -> int:
     if not r.check("GET /health returns 200", status == 200, f"got {status}"):
         print("API not reachable; aborting.")
         return 1
+    status, _, res = request("GET", f"{api}/health/live")
+    r.check("GET /health/live returns 200 Healthy", status == 200 and isinstance(res, dict) and res.get("status") == "Healthy", f"{status} {res}")
+    status, _, res = request("GET", f"{api}/health/ready")
+    r.check("GET /health/ready returns 200 with the database Healthy",
+            status == 200 and isinstance(res, dict) and res.get("checks", {}).get("database") == "Healthy", f"{status} {res}")
+    r.check("health responses carry status names only (no exception text or descriptions)",
+            isinstance(res, dict) and set(res) == {"status", "checks"} and all(isinstance(v, str) for v in res.get("checks", {}).values()), f"{res}")
+    status, h, _ = request("GET", f"{api}/health/live", headers={"X-Correlation-Id": "smoke-test-1"})
+    r.check("X-Correlation-Id from the caller is echoed", h.get("X-Correlation-Id") == "smoke-test-1", f"{h.get('X-Correlation-Id')}")
+    status, h, _ = request("GET", f"{api}/health/live", headers={"X-Correlation-Id": "bad id <script>"})
+    cid = h.get("X-Correlation-Id") or ""
+    r.check("an unsafe X-Correlation-Id is replaced with a generated one", cid not in ("", "bad id <script>") and len(cid) == 32, cid)
+    status, h, res = request("GET", f"{api}/api/products/987654")
+    r.check("problem traceId matches the X-Correlation-Id header",
+            isinstance(res, dict) and res.get("traceId") == h.get("X-Correlation-Id") and res.get("traceId"), f"{res} {h.get('X-Correlation-Id')}")
     status, _, doc = request("GET", f"{api}/swagger/v1/swagger.json")
     if status == 404:
         r.skip("Swagger document", "404 - Swagger UI and JSON are only mapped when ASPNETCORE_ENVIRONMENT=Development")
@@ -299,24 +316,46 @@ def main() -> int:
                 request("GET", f"{mock}/__mode/{m}")
             mode("500")
             status, h, res = request("GET", f"{api}/api/products", headers={"Origin": args.origin})
-            if status == 200:
+            stale = h.get("Catalogue-Stale") == "true"
+            if status == 200 and not stale:
                 r.skip("upstream failure modes", "catalogue is cached; restart the API with FakeStore__CatalogueCacheSeconds=0")
             else:
-                r.check("upstream HTTP 500 -> 502 UPSTREAM_UNAVAILABLE", status == 502 and res.get("code") == "UPSTREAM_UNAVAILABLE", f"{status} {res}")
-                r.check("CORS header present on 502 (browser can read the error)", h.get("Access-Control-Allow-Origin") == args.origin)
-                status, _, res = request("POST", f"{api}/api/checkout", {**base, "items": [{"productId": pid, "quantity": 1}]})
-                r.check("checkout during outage -> 502 (no order without authoritative prices)", status == 502, f"{status} {res}")
+                if status == 200:
+                    r.check("upstream HTTP 500: browsing serves the last good catalogue, marked Catalogue-Stale",
+                            stale and isinstance(res, dict) and len(res.get("items", [])) > 0, f"{status} {h.get('Catalogue-Stale')}")
+                    r.check("Catalogue-Stale is exposed to the browser via CORS",
+                            "catalogue-stale" in (h.get("Access-Control-Expose-Headers") or "").lower(), f"{h.get('Access-Control-Expose-Headers')}")
+                    status, h, _ = request("GET", f"{api}/api/products/{pid}")
+                    r.check("upstream HTTP 500: a single product is served from the last good copy", status == 200 and h.get("Catalogue-Stale") == "true", f"{status}")
+                else:
+                    # FakeStore__StaleCatalogueMaxMinutes=0 turns the fallback off.
+                    r.check("upstream HTTP 500 -> 502 UPSTREAM_UNAVAILABLE (stale fallback off)",
+                            status == 502 and res.get("code") == "UPSTREAM_UNAVAILABLE", f"{status} {res}")
+                    r.check("CORS header present on 502 (browser can read the error)", h.get("Access-Control-Allow-Origin") == args.origin)
+                status, h, res = request("POST", f"{api}/api/checkout", {**base, "items": [{"productId": pid, "quantity": 1}]})
+                r.check("checkout during outage -> 502 UPSTREAM_UNAVAILABLE (never priced from a stale copy)",
+                        status == 502 and res.get("code") == "UPSTREAM_UNAVAILABLE", f"{status} {res}")
+                r.check("502 carries a traceId for support, and no internals",
+                        bool(res.get("traceId")) and "Exception" not in json.dumps(res) and "localhost:9" not in json.dumps(res), f"{res}")
+                status, _, res = request("GET", f"{api}/health/ready")
+                r.check("readiness reports the catalogue Degraded (still 200: the API can serve)",
+                        status == 200 and res.get("checks", {}).get("catalogue") == "Degraded", f"{status} {res}")
+                status, _, _ = request("GET", f"{api}/health/live")
+                r.check("liveness stays 200 during an upstream outage", status == 200)
                 mode("malformed")
-                status, _, res = request("GET", f"{api}/api/categories")
-                r.check("malformed upstream body -> 502 UPSTREAM_MALFORMED", status == 502 and res.get("code") == "UPSTREAM_MALFORMED", f"{status} {res}")
+                status, _, res = request("POST", f"{api}/api/checkout", {**base, "items": [{"productId": pid, "quantity": 1}]})
+                r.check("malformed upstream body -> checkout 502 UPSTREAM_MALFORMED", status == 502 and res.get("code") == "UPSTREAM_MALFORMED", f"{status} {res}")
                 mode("slow")
                 started = time.monotonic()
-                status, _, res = request("GET", f"{api}/api/products", timeout=60)
-                r.check(f"slow upstream -> 504 UPSTREAM_TIMEOUT ({time.monotonic() - started:.1f}s)",
-                        status == 504 and res.get("code") == "UPSTREAM_TIMEOUT", f"{status} {res}")
+                status, _, res = request("POST", f"{api}/api/checkout", {**base, "items": [{"productId": pid, "quantity": 1}]}, timeout=60)
+                elapsed = time.monotonic() - started
+                r.check(f"slow upstream -> checkout 504 UPSTREAM_TIMEOUT within the time budget ({elapsed:.1f}s)",
+                        status == 504 and res.get("code") == "UPSTREAM_TIMEOUT" and elapsed < 15, f"{status} {res}")
                 mode("ok")
-                status, _, _ = request("GET", f"{api}/api/products")
-                r.check("recovers once upstream is healthy", status == 200)
+                status, h, _ = request("GET", f"{api}/api/products")
+                r.check("recovers once upstream is healthy (fresh data, no stale marker)", status == 200 and h.get("Catalogue-Stale") is None, f"{status} {h.get('Catalogue-Stale')}")
+                status, _, res = request("GET", f"{api}/health/ready")
+                r.check("readiness reports the catalogue Healthy again", res.get("checks", {}).get("catalogue") == "Healthy", f"{res}")
         finally:
             request("GET", f"{mock}/__mode/ok")
 

@@ -14,23 +14,60 @@ public interface IProductCatalogService
 
     Task<IReadOnlyList<CategoryDto>> GetCategoriesAsync(CancellationToken cancellationToken);
 
-    /// <summary>The authoritative catalogue keyed by product ID, used for checkout pricing.</summary>
+    /// <summary>
+    /// The authoritative catalogue keyed by product ID, used for checkout pricing. Never stale:
+    /// if FakeStoreAPI can't be reached and the cache has expired, this throws.
+    /// </summary>
     Task<IReadOnlyDictionary<int, CatalogueProduct>> GetCatalogueAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True when the last browsing call on this (per-request) instance was answered from the last good
+    /// catalogue because FakeStoreAPI was failing. Controllers turn it into a "Catalogue-Stale" header.
+    /// </summary>
+    bool ServedStale { get; }
 }
 
 /// <summary>
 /// Loads products from FakeStoreAPI, normalises them once, caches the result briefly and
 /// applies search, category filtering, price filtering and sorting.
-/// Failed upstream calls are never cached.
+/// Failed upstream calls are never cached. Browsing (list, single product, categories) may fall back to
+/// the last good catalogue during an outage; checkout pricing (<see cref="GetCatalogueAsync"/>) never does.
 /// </summary>
 public sealed class ProductCatalogService(
     IFakeStoreClient fakeStoreClient,
     IMemoryCache cache,
-    IOptions<FakeStoreOptions> options) : IProductCatalogService
+    IOptions<FakeStoreOptions> options,
+    CatalogueState state,
+    ILogger<ProductCatalogService> logger) : IProductCatalogService
 {
     internal const string CatalogueCacheKey = "catalogue:v1";
 
     private readonly TimeSpan _cacheDuration = TimeSpan.FromSeconds(options.Value.CatalogueCacheSeconds);
+    private readonly TimeSpan _staleLimit = TimeSpan.FromMinutes(options.Value.StaleCatalogueMaxMinutes);
+
+    public bool ServedStale { get; private set; }
+
+    /// <summary>Records an upstream failure for the readiness report; always true so it can sit in an exception filter.</summary>
+    private bool Record(Exceptions.UpstreamServiceException ex)
+    {
+        state.RecordFailure(ex.Kind);
+        return true;
+    }
+
+    /// <summary>The fresh catalogue, or during an upstream outage the last good one (flagged as stale).</summary>
+    private async Task<IReadOnlyDictionary<int, CatalogueProduct>> GetBrowsingCatalogueAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await GetCatalogueAsync(cancellationToken);
+        }
+        catch (Exceptions.UpstreamServiceException ex) when (state.LastGoodWithin(_staleLimit) is { } lastGood)
+        {
+            logger.LogWarning("FakeStoreAPI unavailable ({Kind}); serving the last good catalogue to browsers.", ex.Kind);
+            ServedStale = true;
+            return lastGood;
+        }
+    }
 
     public async Task<ProductListResponse> GetProductsAsync(
         ProductQueryParameters query, CancellationToken cancellationToken)
@@ -40,7 +77,7 @@ public sealed class ProductCatalogService(
             throw new ArgumentException("Unsupported sort value.", nameof(query));
         }
 
-        var catalogue = await GetCatalogueAsync(cancellationToken);
+        var catalogue = await GetBrowsingCatalogueAsync(cancellationToken);
         var terms = SplitSearchTerms(query.Search);
 
         IEnumerable<CatalogueProduct> results = catalogue.Values
@@ -71,13 +108,22 @@ public sealed class ProductCatalogService(
             return cached.TryGetValue(id, out var hit) ? ToDto(hit) : null;
         }
 
-        var product = await fakeStoreClient.GetProductAsync(id, cancellationToken);
-        return product is null ? null : ToDto(Normalize(product));
+        try
+        {
+            var product = await fakeStoreClient.GetProductAsync(id, cancellationToken);
+            return product is null ? null : ToDto(Normalize(product));
+        }
+        catch (Exceptions.UpstreamServiceException ex) when (Record(ex) && state.LastGoodWithin(_staleLimit) is { } lastGood)
+        {
+            logger.LogWarning("FakeStoreAPI unavailable ({Kind}); serving product {ProductId} from the last good catalogue.", ex.Kind, id);
+            ServedStale = true;
+            return lastGood.TryGetValue(id, out var stale) ? ToDto(stale) : null;
+        }
     }
 
     public async Task<IReadOnlyList<CategoryDto>> GetCategoriesAsync(CancellationToken cancellationToken)
     {
-        var catalogue = await GetCatalogueAsync(cancellationToken);
+        var catalogue = await GetBrowsingCatalogueAsync(cancellationToken);
 
         var categories = catalogue.Values
             .GroupBy(p => p.Category)
@@ -108,18 +154,44 @@ public sealed class ProductCatalogService(
             return cached;
         }
 
-        var products = await fakeStoreClient.GetProductsAsync(cancellationToken);
-        var catalogue = products
-            .Select(Normalize)
-            .GroupBy(p => p.Id)
-            .ToDictionary(g => g.Key, g => g.First());
-
-        if (_cacheDuration > TimeSpan.Zero)
+        // One upstream call at a time: requests that arrive while it is in flight wait for it and then
+        // read its result from the cache, instead of each calling FakeStoreAPI.
+        await state.RefreshGate.WaitAsync(cancellationToken);
+        try
         {
-            cache.Set(CatalogueCacheKey, (IReadOnlyDictionary<int, CatalogueProduct>)catalogue, _cacheDuration);
-        }
+            if (cache.TryGetValue(CatalogueCacheKey, out cached) && cached is not null)
+            {
+                return cached;
+            }
 
-        return catalogue;
+            IReadOnlyList<FakeStoreProduct> products;
+            try
+            {
+                products = await fakeStoreClient.GetProductsAsync(cancellationToken);
+            }
+            catch (Exceptions.UpstreamServiceException ex)
+            {
+                state.RecordFailure(ex.Kind);
+                throw;
+            }
+
+            IReadOnlyDictionary<int, CatalogueProduct> catalogue = products
+                .Select(Normalize)
+                .GroupBy(p => p.Id)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            if (_cacheDuration > TimeSpan.Zero)
+            {
+                cache.Set(CatalogueCacheKey, catalogue, _cacheDuration);
+            }
+
+            state.RecordSuccess(catalogue);
+            return catalogue;
+        }
+        finally
+        {
+            state.RefreshGate.Release();
+        }
     }
 
     internal static CatalogueProduct Normalize(FakeStoreProduct source)

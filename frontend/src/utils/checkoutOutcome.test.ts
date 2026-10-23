@@ -22,6 +22,7 @@ describe('isUncertainOutcome', () => {
     ['product catalogue timed out', error(504, 'UPSTREAM_TIMEOUT')],
     ['product catalogue sent bad data', error(502, 'UPSTREAM_MALFORMED')],
     ['database busy (rejected before saving)', error(503, 'DATABASE_BUSY')],
+    ['database unavailable (could not be opened, so nothing was saved)', error(503, 'DATABASE_UNAVAILABLE')],
     ['validation', error(400, 'VALIDATION_FAILED')],
     ['expired session', error(401, 'SESSION_EXPIRED')],
     ['price changed', error(409, 'PRICE_CHANGED')],

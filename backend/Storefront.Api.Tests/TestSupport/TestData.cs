@@ -41,10 +41,17 @@ internal static class TestData
         return Options.Create(options);
     }
 
-    public static ProductCatalogService CatalogService(IFakeStoreClient client, int cacheSeconds = 300) => new(
+    public static ProductCatalogService CatalogService(
+        IFakeStoreClient client,
+        int cacheSeconds = 300,
+        CatalogueState? state = null,
+        IMemoryCache? cache = null,
+        int staleMinutes = 60) => new(
         client,
-        new MemoryCache(new MemoryCacheOptions()),
-        Options.Create(new FakeStoreOptions { CatalogueCacheSeconds = cacheSeconds }));
+        cache ?? new MemoryCache(new MemoryCacheOptions()),
+        Options.Create(new FakeStoreOptions { CatalogueCacheSeconds = cacheSeconds, StaleCatalogueMaxMinutes = staleMinutes }),
+        state ?? new CatalogueState(TimeProvider.System),
+        NullLogger<ProductCatalogService>.Instance);
 
     public static readonly DateTimeOffset Now = new(2026, 10, 22, 10, 0, 0, TimeSpan.Zero);
 
