@@ -9,7 +9,6 @@ namespace Storefront.Api.Controllers;
 
 [ApiController]
 [Route("api/checkout")]
-[Produces("application/json")]
 public sealed class CheckoutController(ICheckoutService checkoutService) : ControllerBase
 {
     /// <summary>

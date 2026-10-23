@@ -19,8 +19,9 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
 {
     private readonly bool _deleteDatabaseOnDispose;
 
-    public StorefrontApiFactory(string? databasePath = null, int accountPermitLimit = 1000)
+    public StorefrontApiFactory(string? databasePath = null, int accountPermitLimit = 1000, TimeProvider? timeProvider = null)
     {
+        Time = timeProvider;
         DatabasePath = databasePath ?? Path.Combine(Path.GetTempPath(), $"storefront-api-test-{Guid.NewGuid():N}.db");
         _deleteDatabaseOnDispose = databasePath is null;
         AccountPermitLimit = accountPermitLimit;
@@ -29,6 +30,9 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
     public string DatabasePath { get; }
 
     public int AccountPermitLimit { get; }
+
+    /// <summary>When set, replaces the system clock for the whole app, including token expiry.</summary>
+    internal TimeProvider? Time { get; }
 
     internal InMemoryFakeStoreClient Catalogue { get; } = new(TestData.Catalogue());
 
@@ -42,6 +46,11 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<IFakeStoreClient>();
             services.AddSingleton<IFakeStoreClient>(Catalogue);
+            if (Time is not null)
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton(Time);
+            }
         });
     }
 
@@ -56,7 +65,11 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
     }
 
     /// <summary>Registers an account and returns an HttpClient that sends its bearer token.</summary>
-    public async Task<HttpClient> CreateSignedInClientAsync(string email, string password = "Str0ng!Passw0rd")
+    public async Task<HttpClient> CreateSignedInClientAsync(string email, string password = "Str0ng!Passw0rd") =>
+        (await SignInAsync(email, password)).Client;
+
+    /// <summary>Registers (if needed) and signs in, returning the client and the issued tokens.</summary>
+    public async Task<(HttpClient Client, TokenResponse Tokens)> SignInAsync(string email, string password = "Str0ng!Passw0rd")
     {
         var client = CreateClient();
         var register = await client.PostAsJsonAsync("/api/account/register", new { email, password });
@@ -69,7 +82,7 @@ public sealed class StorefrontApiFactory : WebApplicationFactory<Program>
         login.EnsureSuccessStatusCode();
         var token = await login.Content.ReadFromJsonAsync<TokenResponse>();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token!.AccessToken);
-        return client;
+        return (client, token);
     }
 
     public sealed record TokenResponse(string TokenType, string AccessToken, int ExpiresIn, string RefreshToken);

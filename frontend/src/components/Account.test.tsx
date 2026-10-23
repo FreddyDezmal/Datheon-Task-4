@@ -16,6 +16,7 @@ import {
   pricingRules,
   problem,
   seedSession,
+  settle,
   unauthorized,
 } from '../test/fixtures';
 import { SESSION_STORAGE_KEY } from '../utils/sessionStorage';
@@ -191,7 +192,7 @@ describe('restoring and expiring sessions', () => {
     expect(await screen.findByText(/Your session has expired/)).toBeInTheDocument();
     expect(accountButton()).toHaveAccessibleName('Sign in');
     expect(window.sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
-    await new Promise((r) => setTimeout(r, 50));
+    await settle();
     expect(callsTo(fetchMock, '/api/account/refresh')).toHaveLength(1);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
@@ -264,7 +265,7 @@ describe('restoring and expiring sessions', () => {
     await user.click(accountButton());
     expect(await screen.findByRole('dialog', { name: 'Sign in' })).toBeInTheDocument();
     expect(await screen.findByText(/Your session has expired/)).toBeInTheDocument();
-    await new Promise((r) => setTimeout(r, 50));
+    await settle();
     expect(callsTo(fetchMock, '/api/orders')).toHaveLength(1);
     expect(refreshCalls).toBe(2);
   });
@@ -331,5 +332,35 @@ describe('order history', () => {
     await user.click(await screen.findByRole('button', { name: /DEMO-20261022-AAAAAA/ }));
 
     expect(await screen.findByText('This order could not be found.')).toBeInTheDocument();
+  });
+});
+
+describe('expired session during checkout', () => {
+  it('keeps the expired-session notice if the shopper opens sign-in and comes back without signing in', async () => {
+    seedSession();
+    window.localStorage.setItem(
+      'greenhaus.cart',
+      JSON.stringify({ version: 1, items: [{ productId: 2, title: 'Mens Casual Slim Fit T-Shirt', image: '', unitPriceMinor: 2230, quantity: 1 }] }),
+    );
+    let refreshes = 0;
+    mockApi({
+      routes: { ...accountRoutes(), '/api/account/refresh': () => (++refreshes === 1 ? jsonResponse(issueTokens()) : unauthorized()) },
+      checkout: () => unauthorized(),
+    });
+    const { user } = renderApp();
+    await waitFor(() => expect(accountButton()).toHaveAccessibleName(/signed in/));
+    await user.click(screen.getByRole('button', { name: /open cart/i }));
+    await user.click(screen.getByRole('button', { name: 'Check out' }));
+    const checkout = screen.getByRole('dialog', { name: 'Check out' });
+    await user.type(within(checkout).getByLabelText('Full name'), 'Ada Lovelace');
+    await user.click(within(checkout).getByRole('button', { name: 'Place demo order' }));
+    expect(await within(checkout).findByRole('alert')).toHaveTextContent('Your session expired');
+
+    await user.click(within(checkout).getByRole('button', { name: 'Sign in again' }));
+    await user.keyboard('{Escape}'); // leave sign-in without signing in
+
+    const back = await screen.findByRole('dialog', { name: 'Check out' });
+    expect(within(back).getByRole('alert')).toHaveTextContent('Your session expired');
+    expect(within(back).getByRole('button', { name: 'Place order as a guest' })).toBeInTheDocument();
   });
 });

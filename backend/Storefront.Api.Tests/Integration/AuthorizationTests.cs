@@ -1,3 +1,4 @@
+using Storefront.Api.Tests.TestSupport;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -6,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Storefront.Api.Tests.Integration;
 
+[Trait("Category", TestCategories.Api)]
 public sealed class AuthorizationTests : IDisposable
 {
     private readonly StorefrontApiFactory _factory = new();

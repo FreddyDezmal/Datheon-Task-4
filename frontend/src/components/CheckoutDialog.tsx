@@ -5,6 +5,7 @@ import { usePricingRules } from '../context/StoreConfigContext';
 import { useModalBehavior } from '../hooks/useModalBehavior';
 import { ApiError } from '../services/apiClient';
 import { createIdempotencyKey, submitCheckout, type CheckoutResult } from '../services/checkoutService';
+import { isUncertainOutcome } from '../utils/checkoutOutcome';
 import { parseOrderQuote } from '../services/responseParsers';
 import type { CheckoutConfirmation, CustomerDetails } from '../types/checkout';
 import { validateCustomer, type CustomerErrors } from '../utils/checkoutValidation';
@@ -34,12 +35,7 @@ type Step =
   | { name: 'submitting' }
   | { name: 'confirmed'; confirmation: CheckoutConfirmation; replayed: boolean; savedToAccount: boolean };
 
-/** Failures after which the order might nevertheless have been saved. */
-const isUncertainOutcome = (error: ApiError) =>
-  error.code === 'NETWORK_ERROR' ||
-  error.code === 'TIMEOUT' ||
-  error.code === 'INVALID_RESPONSE' ||
-  (error.status >= 500 && !error.code.startsWith('UPSTREAM_') && error.code !== 'DATABASE_BUSY');
+
 
 /**
  * Checkout flow: details → submitting → confirmed.

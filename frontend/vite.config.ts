@@ -14,5 +14,42 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     css: false,
     restoreMocks: true,
+    unstubGlobals: true,
+    // Two categories, runnable separately with `--project unit` or `--project component`:
+    //  - unit: functions, services, hooks and context logic in isolation
+    //  - component: components and whole shopper workflows rendered in jsdom, with fetch replaced
+    //    by the fake API in src/test/fixtures.ts (real response shapes, no network)
+    // Browser journeys against the real API live in e2e/ and run with Playwright, not Vitest.
+    projects: [
+      {
+        extends: true,
+        test: { name: 'unit', include: ['src/{utils,services,context,hooks}/**/*.test.{ts,tsx}'] },
+      },
+      {
+        extends: true,
+        test: { name: 'component', include: ['src/components/**/*.test.tsx', 'src/App.test.tsx'] },
+      },
+    ],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/*.test.{ts,tsx}', // the tests themselves
+        'src/test/**', // test setup and the fake API
+        'src/main.tsx', // three lines that mount <App /> into index.html; exercised by the browser tests
+        'src/vite-env.d.ts', // type declarations only
+        'src/types/**', // type declarations only (no runtime code)
+      ],
+      reporter: ['text', 'text-summary', 'html', 'lcov', 'json-summary'],
+      reportsDirectory: './coverage',
+      // Set a little below the measured baseline (see Documentation/Testing.md): they catch a real
+      // drop without failing the build over a one-line change. Raise them as coverage improves.
+      thresholds: {
+        statements: 93,
+        branches: 88,
+        functions: 92,
+        lines: 95,
+      },
+    },
   },
 });

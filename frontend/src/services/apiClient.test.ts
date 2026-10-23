@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, apiRequest } from './apiClient';
 
 const respond = (body: string | null, status: number, headers: Record<string, string> = {}) =>
@@ -75,5 +75,103 @@ describe('apiRequest', () => {
 
     expect(error.code).toBe('NETWORK_ERROR');
     expect(error.status).toBe(0);
+  });
+
+  it('reads an HTTP-date Retry-After as seconds from now', async () => {
+    vi.useFakeTimers({ now: new Date('2026-10-22T10:00:00Z'), toFake: ['Date'] });
+    respond(null, 429, { 'Retry-After': 'Thu, 22 Oct 2026 10:00:45 GMT' });
+    const error = await failureOf(apiRequest('/x', () => null));
+
+    expect(error.retryAfterSeconds).toBe(45);
+  });
+
+  it('ignores an unreadable Retry-After', async () => {
+    respond(null, 429, { 'Retry-After': 'soon' });
+    const error = await failureOf(apiRequest('/x', () => null));
+
+    expect(error.retryAfterSeconds).toBeNull();
+    expect(error.message).toBe('Too many requests. Wait a moment and try again.');
+  });
+});
+
+describe('apiRequest request construction', () => {
+  it('sends JSON with the right headers only when there is a body, and merges extra headers', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await apiRequest('/api/checkout', (d) => d, { method: 'POST', body: { a: 1 }, headers: { 'Idempotency-Key': 'key-12345' } });
+    await apiRequest('/api/products', (d) => d);
+
+    const [postUrl, post] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(postUrl).toBe('http://localhost:5080/api/checkout');
+    expect(post.method).toBe('POST');
+    expect(post.body).toBe('{"a":1}');
+    expect(post.headers).toEqual({ Accept: 'application/json', 'Content-Type': 'application/json', 'Idempotency-Key': 'key-12345' });
+
+    const [, get] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(get.method).toBe('GET');
+    expect(get.body).toBeUndefined();
+    expect(get.headers).toEqual({ Accept: 'application/json' });
+  });
+
+  it('treats an empty success body as null for the parser', async () => {
+    respond('', 200);
+    const parse = vi.fn(() => 'parsed');
+
+    await expect(apiRequest('/x', parse)).resolves.toBe('parsed');
+    expect(parse).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('apiRequest timeouts and cancellation', () => {
+  afterEach(() => vi.useRealTimers());
+
+  // A fetch that only settles when its signal aborts, like a request to a server that never answers.
+  // Like the real fetch, it rejects at once if the signal is already aborted.
+  const hangingFetch = () =>
+    vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+          if (init?.signal?.aborted) abort();
+          else init?.signal?.addEventListener('abort', abort);
+        }),
+    );
+
+  it('gives up after the timeout with a TIMEOUT error the UI can retry', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', hangingFetch());
+    const pending = failureOf(apiRequest('/x', () => null, { timeoutMs: 5000 }));
+
+    await vi.advanceTimersByTimeAsync(4999);
+    let settled = false;
+    void pending.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await pending;
+    expect(error.code).toBe('TIMEOUT');
+    expect(error.isRetryable).toBe(true);
+  });
+
+  it('rethrows a caller abort as an AbortError, not as a failure to show the user', async () => {
+    vi.stubGlobal('fetch', hangingFetch());
+    const controller = new AbortController();
+    const pending = apiRequest('/x', () => null, { signal: controller.signal });
+
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('fails at once, without waiting for the timeout, when the signal is already aborted', async () => {
+    const fetchMock = hangingFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(apiRequest('/x', () => null, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    // The signal handed to fetch is aborted too, so the browser never sends the request.
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.signal?.aborted).toBe(true);
   });
 });

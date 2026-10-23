@@ -1,9 +1,11 @@
+using Storefront.Api.Tests.TestSupport;
 using System.Net;
 using System.Net.Http.Json;
 using static Storefront.Api.Tests.Integration.AuthorizationTests;
 
 namespace Storefront.Api.Tests.Integration;
 
+[Trait("Category", TestCategories.Api)]
 public sealed class HttpSecurityTests : IDisposable
 {
     private readonly StorefrontApiFactory _factory = new();
@@ -19,6 +21,49 @@ public sealed class HttpSecurityTests : IDisposable
         Assert.Equal("DENY", response.Headers.GetValues("X-Frame-Options").Single());
         Assert.Equal("no-referrer", response.Headers.GetValues("Referrer-Policy").Single());
         Assert.Contains("default-src 'none'", response.Headers.GetValues("Content-Security-Policy").Single());
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/products", null)]
+    [InlineData("GET", "/api/products/2", null)]
+    [InlineData("GET", "/api/categories", null)]
+    [InlineData("GET", "/api/store/config", null)]
+    public async Task Successful_responses_are_plain_json(string method, string path, string? body)
+    {
+        var response = await _factory.CreateClient().SendAsync(new HttpRequestMessage(new HttpMethod(method), path)
+        {
+            Content = body is null ? null : new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Theory]
+    [InlineData("/api/products/999", HttpStatusCode.NotFound)]
+    [InlineData("/api/products?sort=cheapest", HttpStatusCode.BadRequest)]
+    [InlineData("/api/products/0", HttpStatusCode.BadRequest)]
+    public async Task Controller_errors_are_problem_json_like_every_other_error(string path, HttpStatusCode status)
+    {
+        var response = await _factory.CreateClient().GetAsync(path);
+
+        Assert.Equal(status, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Order_lookups_and_checkout_auth_failures_are_problem_json()
+    {
+        var signedIn = await _factory.CreateSignedInClientAsync("ctype@example.com");
+        var missing = await signedIn.GetAsync("/api/orders/DEMO-20261022-ZZZZZZ");
+        var bad = _factory.CreateClient();
+        bad.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "x");
+        var expired = await bad.PostAsJsonAsync("/api/checkout", Order((2, 1)));
+
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        Assert.Equal("application/problem+json", missing.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
+        Assert.Equal("application/problem+json", expired.Content.Headers.ContentType?.MediaType);
     }
 
     [Fact]
@@ -80,6 +125,7 @@ public sealed class HttpSecurityTests : IDisposable
     }
 }
 
+[Trait("Category", TestCategories.Api)]
 public sealed class RateLimitTests : IDisposable
 {
     private readonly StorefrontApiFactory _factory = new(accountPermitLimit: 3);

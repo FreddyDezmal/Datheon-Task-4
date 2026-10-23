@@ -9,7 +9,6 @@ namespace Storefront.Api.Controllers;
 /// <summary>The signed-in customer's own orders. Requires a bearer token from /api/account/login.</summary>
 [ApiController]
 [Route("api/orders")]
-[Produces("application/json")]
 [Authorize(Policy = AuthorizationPolicies.Customer)]
 [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
 public sealed class OrdersController(IOrderQueryService orders) : ControllerBase

@@ -129,6 +129,10 @@
 }
 
 .field input {
+  /* Fill the column, but never set its minimum: an input's built-in width (plus the room kept for
+     the Show password button) otherwise made the sign-in form wider than a 320px screen. */
+  width: 100%;
+  min-width: 0;
   height: 2.75rem;
   padding: 0 var(--space-3);
   border: 1px solid var(--color-line-strong);
@@ -341,6 +345,7 @@
 .auth-form {
   display: grid;
   gap: var(--space-4);
+  min-width: 0;
 }
 
 .auth-form__intro,

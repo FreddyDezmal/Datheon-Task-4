@@ -1,3 +1,4 @@
+using Storefront.Api.Tests.TestSupport;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.Sqlite;
@@ -8,6 +9,7 @@ using Storefront.Api.Models;
 
 namespace Storefront.Api.Tests.Checkout;
 
+[Trait("Category", TestCategories.Unit)]
 public class GlobalExceptionHandlerTests
 {
     [Fact]

@@ -1,8 +1,10 @@
+using Storefront.Api.Tests.TestSupport;
 using Storefront.Api.Models;
 using Storefront.Api.Services;
 
 namespace Storefront.Api.Tests.Catalogue;
 
+[Trait("Category", TestCategories.Unit)]
 public class ProductBadgeRulesTests
 {
     [Theory]

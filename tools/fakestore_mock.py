@@ -41,7 +41,11 @@ def svg(i):
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def send(self, code, body, ctype="application/json"):
-        b = body.encode(); self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        b = body.encode()
+        try:
+            self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the client gave up (e.g. a browser cancelling an image it no longer needs)
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/")
         if path.startswith("/__mode/"): MODE["value"] = path.split("/")[-1]; return self.send(200, '{"mode":"%s"}' % MODE["value"])

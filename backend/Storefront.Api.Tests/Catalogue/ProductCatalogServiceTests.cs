@@ -4,6 +4,7 @@ using Storefront.Api.Tests.TestSupport;
 
 namespace Storefront.Api.Tests.Catalogue;
 
+[Trait("Category", TestCategories.Unit)]
 public class ProductCatalogServiceTests
 {
     private readonly InMemoryFakeStoreClient _client = new(TestData.Catalogue());

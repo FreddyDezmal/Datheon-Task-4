@@ -9,6 +9,7 @@ using static Storefront.Api.Tests.Integration.AuthorizationTests;
 
 namespace Storefront.Api.Tests.Integration;
 
+[Trait("Category", TestCategories.Api)]
 public sealed class CheckoutApiTests : IDisposable
 {
     private readonly StorefrontApiFactory _factory = new();

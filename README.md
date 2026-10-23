@@ -4,7 +4,7 @@ A demo storefront with a React + TypeScript frontend and an ASP.NET Core Web API
 
 > Checkout is a **demo**: no payment is taken and no card details are requested. Orders are saved locally in `backend/Storefront.Api/App_Data/storefront.db`.
 
-**Design notes:** [`Documentation/Backend.md`](Documentation/Backend.md) (layers, authentication, database, idempotency, error codes) and [`Documentation/Frontend.md`](Documentation/Frontend.md) (API layer, sessions, checkout outcomes, responsive and accessibility decisions).
+**Design notes:** [`Documentation/Backend.md`](Documentation/Backend.md) (layers, authentication, database, idempotency, error codes) and [`Documentation/Frontend.md`](Documentation/Frontend.md) (API layer, sessions, checkout outcomes, responsive and accessibility decisions). **Testing:** [`Documentation/Testing.md`](Documentation/Testing.md) (test categories, commands, coverage reports, results) and the [manual test plan](Documentation/Testing/ManualTestPlan.md).
 
 ---
 
@@ -84,6 +84,8 @@ storefront/
 ├── Documentation/
 │   ├── Backend.md                   # backend design: layers, auth, database, idempotency, error codes
 │   ├── Frontend.md                  # frontend design: API layer, sessions, checkout outcomes, responsive/a11y
+│   ├── Testing.md                   # test strategy, commands, coverage reports, results, known gaps
+│   ├── Testing/ManualTestPlan.md    # checklist for human testing (devices, screen readers, zoom)
 │   └── Audits/                      # AUDIT.md (audit report) and storefront-audit.patch
 ├── .gitignore
 ├── tools/
@@ -91,7 +93,8 @@ storefront/
 │   └── smoke_test.py                # end-to-end API checks (endpoints, repricing, idempotency, accounts, CORS, Swagger, outages)
 ├── backend/
 │   ├── Storefront.slnx
-│   ├── .config/dotnet-tools.json    # pins the dotnet-ef tool (dotnet tool restore)
+│   ├── .config/dotnet-tools.json    # pins dotnet-ef and ReportGenerator (dotnet tool restore)
+│   ├── coverage.runsettings         # what backend coverage measures and excludes
 │   ├── Storefront.Api/
 │   │   ├── Storefront.Api.csproj
 │   │   ├── Storefront.Api.http      # example requests
@@ -114,6 +117,8 @@ storefront/
 │       └── Integration/             # whole API in memory: auth, ownership, restarts, errors, headers
 └── frontend/
     ├── package.json  vite.config.ts  tsconfig*.json  index.html  .env.example
+    ├── playwright.config.ts         # browser tests: starts mock, API (fresh SQLite) and Vite on ports 9101/5081/5174
+    ├── e2e/                         # shopper-journeys, responsive-accessibility specs; support/ helpers
     ├── public/favicon.svg
     └── src/
         ├── main.tsx  App.tsx  App.test.tsx  vite-env.d.ts
@@ -222,19 +227,27 @@ The mock's modes, switched with `GET /__mode/<mode>`: `ok` (default), `500` (eve
 
 ### Tests
 
+Full details, categories and coverage reports: [`Documentation/Testing.md`](Documentation/Testing.md).
+
 ```bash
 # Backend: needs network access to nuget.org for the first restore
 cd storefront/backend
 dotnet restore
+dotnet tool restore                          # dotnet-ef and ReportGenerator
 dotnet build -c Release
-dotnet test -c Release --no-build --logger "console;verbosity=normal"   # 161 tests; each test uses its own temporary SQLite database
+dotnet test -c Release                       # 190 xUnit tests; add --filter Category=Unit|Database|Api to run one group
 
 # Frontend
 cd storefront/frontend
 npm ci
-npm run typecheck      # strict tsc -b
-npm test               # Vitest + Testing Library (jsdom), 98 tests; the API is mocked with real response shapes
-npm run build          # type-check + production bundle
+npm run typecheck                            # strict tsc -b (app, tests and browser tests)
+npm test                                     # 230 Vitest tests (npm run test:unit / test:component for one group)
+npm run test:coverage                        # coverage report in coverage/index.html, with thresholds
+npm run build                                # type-check + production bundle
+
+# Browser journeys (Playwright): starts its own API, database, mock and Vite on separate ports
+npx playwright install chromium              # first time only
+npm run test:e2e                             # 16 tests; report: npm run test:e2e:report
 ```
 
 ### End-to-end API smoke test
@@ -470,7 +483,20 @@ Responsive: layouts were checked at 320, 375, 768, 1024 and 1440 px wide with no
 
 ## 9. Verification status
 
-**Current version (frontend accounts, product details, responsive and error-handling pass).** Verified on 23 October 2026 in a Linux workspace (.NET SDK 10.0.401, Node 22.22.0, headless Chromium) against the real API backed by `tools/fakestore_mock.py`:
+**Current version (testing and QA pass).** Verified on 23 October 2026 in a Linux workspace (.NET SDK 10.0.401, Node 22.22.0, Chromium 141 with Playwright 1.64.0). Details, coverage and exclusions are in `Documentation/Testing.md`.
+
+| Check | Result |
+|---|---|
+| Backend `dotnet build -c Release`, `dotnet test -c Release` | **Passed: 190 of 190** (unit 104, database 28, API 58), 0 skipped. Coverage 96.3% of lines (1030/1069) and 88.1% of branches (430/488), up from 95.9% and 87.2% |
+| Frontend `npm run typecheck`, `npm run build`, `npm run test:coverage` | **Passed: 230 of 230** (unit 164, component 66), 0 skipped. Coverage 96.8% of lines (975/1007) and 90.2% of branches (823/912), up from 92.55% and 81.65%; thresholds met |
+| Browser `npm run test:e2e` | **Passed: 16 of 16**: 8 shopper journeys against the real API and a fresh database, layout at 320–1440 px, axe WCAG 2.2 A/AA scan (0 violations), keyboard paths, reduced motion |
+| Deliberate breakages | Frontend 21 of 21 caught; the backend's new safeguards and the browser idempotency journey each fail when broken |
+| Defects found and fixed | Controller errors were labelled `application/json` instead of `application/problem+json`; the idempotency race-recovery path had never run under test; the sign-in form overflowed a 320 px screen |
+| `tools/smoke_test.py --mock` | **Passed: 59 of 59** against the rebuilt API (Swagger, error codes and content types included) |
+| Owner's Windows machine for this version | **Passed** (23 October 2026, reported by the owner): `dotnet tool restore`, `dotnet test -c Release`, `npm ci`, `npm test`, `npm run test:coverage`, `npx playwright install chromium`, `npm run test:e2e` |
+| Manual test plan | **Not yet carried out**; checklist in `Documentation/Testing/ManualTestPlan.md` |
+
+**Previous version (frontend accounts, product details, responsive and error-handling pass).** Verified on 23 October 2026 in a Linux workspace (.NET SDK 10.0.401, Node 22.22.0, headless Chromium) against the real API backed by `tools/fakestore_mock.py`:
 
 | Check | Result |
 |---|---|

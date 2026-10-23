@@ -5,6 +5,7 @@ using Storefront.Api.Tests.TestSupport;
 
 namespace Storefront.Api.Tests.Pricing;
 
+[Trait("Category", TestCategories.Unit)]
 public class PricingCalculatorTests
 {
     private readonly PricingCalculator _calculator = new(TestData.PricingOptions());

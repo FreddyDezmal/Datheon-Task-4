@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Storefront.Api.Data;
 
 namespace Storefront.Api.Tests.TestSupport;
@@ -42,8 +43,8 @@ internal sealed class TestDatabase : IDisposable
         return new TestDatabase($"Data Source={path}", null, path);
     }
 
-    public StorefrontDbContext CreateContext() =>
-        new(new DbContextOptionsBuilder<StorefrontDbContext>().UseSqlite(ConnectionString).Options);
+    public StorefrontDbContext CreateContext(params IInterceptor[] interceptors) =>
+        new(new DbContextOptionsBuilder<StorefrontDbContext>().UseSqlite(ConnectionString).AddInterceptors(interceptors).Options);
 
     public void Dispose()
     {

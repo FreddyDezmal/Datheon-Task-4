@@ -1,3 +1,4 @@
+import { act } from '@testing-library/react';
 import { vi } from 'vitest';
 import type { Category, Product } from '../types/product';
 import type { PricingRules } from '../types/store';
@@ -132,3 +133,14 @@ export const orderDetails = {
 
 export const callsTo = (fetchMock: ReturnType<typeof mockApi>, path: string) =>
   fetchMock.mock.calls.filter(([input]) => new URL(String(input)).pathname === path);
+
+/**
+ * Lets every pending fake request, promise and zero-delay timer run to completion. Use it before
+ * asserting that something did NOT happen (e.g. no retry loop): with the fake API nothing is slow,
+ * so a loop would show up within these turns. Not a timed sleep.
+ */
+export async function settle(turns = 10) {
+  for (let i = 0; i < turns; i += 1) {
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  }
+}

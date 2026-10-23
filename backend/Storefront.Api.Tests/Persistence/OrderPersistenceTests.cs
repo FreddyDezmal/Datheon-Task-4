@@ -9,6 +9,7 @@ using Storefront.Api.Tests.TestSupport;
 
 namespace Storefront.Api.Tests.Persistence;
 
+[Trait("Category", TestCategories.Database)]
 public sealed class OrderPersistenceTests : IDisposable
 {
     private readonly InMemoryFakeStoreClient _client = new(TestData.Catalogue());
@@ -179,6 +180,65 @@ public sealed class OrderPersistenceTests : IDisposable
         Assert.Single(results.Select(r => r.Confirmation.OrderReference).Distinct());
         Assert.Single(results, r => !r.IsReplay);
         await using var check = fileDatabase.CreateContext();
+        Assert.Equal(1, await check.Orders.CountAsync());
+    }
+
+    [Fact]
+    public async Task Losing_the_insert_race_returns_the_winners_order_instead_of_failing_or_duplicating()
+    {
+        // Both requests pass the "already ordered?" check; the other one commits first, so this
+        // request's insert hits the unique index on IdempotencyKey. It must answer with the winner's
+        // order. (The parallel test above usually serialises before reaching this path.)
+        var caller = new CheckoutCaller(null, "key-0007-race-loser");
+        CheckoutResult? winner = null;
+        var race = new BeforeFirstSave(async () => winner = await Checkout(TwoLineRequest(), caller));
+
+        await using var db = _database.CreateContext(race);
+        var loser = await TestData.CheckoutService(_client, db).CheckoutAsync(TwoLineRequest(), caller, CancellationToken.None);
+
+        Assert.NotNull(winner);
+        Assert.False(winner.IsReplay);
+        Assert.True(loser.IsReplay);
+        Assert.Equal(winner.Confirmation.OrderReference, loser.Confirmation.OrderReference);
+        await using var check = _database.CreateContext();
+        Assert.Equal(1, await check.Orders.CountAsync());
+    }
+
+    [Fact]
+    public async Task Losing_the_race_to_a_different_order_with_the_same_key_is_rejected_not_merged()
+    {
+        var caller = new CheckoutCaller(null, "key-0008-race-other");
+        var other = CheckoutRequestValidatorTests.ValidRequest((2, 1));
+        other.ExpectedTotal = 30.07m;
+        var race = new BeforeFirstSave(() => Checkout(other, caller));
+
+        await using var db = _database.CreateContext(race);
+        await Assert.ThrowsAsync<IdempotencyKeyReusedException>(() =>
+            TestData.CheckoutService(_client, db).CheckoutAsync(TwoLineRequest(), caller, CancellationToken.None));
+
+        await using var check = _database.CreateContext();
+        var saved = await check.Orders.Include(o => o.Lines).SingleAsync();
+        Assert.Single(saved.Lines); // the other request's order, untouched
+    }
+
+    [Fact]
+    public async Task Repeated_reference_collisions_give_up_with_an_error_rather_than_loop_or_save_twice()
+    {
+        var always = new SequenceReferenceGenerator("DEMO-20261022-SAMESA");
+        await using (var db = _database.CreateContext())
+        {
+            await TestData.CheckoutService(_client, db, references: always).CheckoutAsync(TwoLineRequest(), CheckoutCaller.Guest, CancellationToken.None);
+        }
+
+        await using (var db = _database.CreateContext())
+        {
+            var service = TestData.CheckoutService(_client, db, references: new SequenceReferenceGenerator("DEMO-20261022-SAMESA"));
+            var error = await Assert.ThrowsAsync<DbUpdateException>(() =>
+                service.CheckoutAsync(TwoLineRequest(), CheckoutCaller.Guest, CancellationToken.None));
+            Assert.True(Storefront.Api.Data.DatabaseErrors.IsUniqueViolation(error));
+        }
+
+        await using var check = _database.CreateContext();
         Assert.Equal(1, await check.Orders.CountAsync());
     }
 

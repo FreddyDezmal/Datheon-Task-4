@@ -6,7 +6,6 @@ namespace Storefront.Api.Controllers;
 
 [ApiController]
 [Route("api/products")]
-[Produces("application/json")]
 public sealed class ProductsController(IProductCatalogService catalogService) : ControllerBase
 {
     /// <summary>Lists products with optional search, category, price range and sort.</summary>

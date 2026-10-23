@@ -4,6 +4,7 @@ using Storefront.Api.Tests.TestSupport;
 
 namespace Storefront.Api.Tests.Checkout;
 
+[Trait("Category", TestCategories.Unit)]
 public class CheckoutRequestValidatorTests
 {
     private readonly CheckoutRequestValidator _validator = new(TestData.PricingOptions());

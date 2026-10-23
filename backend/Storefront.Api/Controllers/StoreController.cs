@@ -8,7 +8,6 @@ namespace Storefront.Api.Controllers;
 
 [ApiController]
 [Route("api/store")]
-[Produces("application/json")]
 public sealed class StoreController(IOptions<PricingOptions> pricingOptions) : ControllerBase
 {
     /// <summary>Currency and pricing rules, so the cart preview uses the same rules as checkout.</summary>

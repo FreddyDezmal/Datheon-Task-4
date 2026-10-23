@@ -5,6 +5,7 @@ using Storefront.Api.Tests.TestSupport;
 
 namespace Storefront.Api.Tests.Checkout;
 
+[Trait("Category", TestCategories.Database)]
 public sealed class CheckoutServiceTests : IDisposable
 {
     private readonly InMemoryFakeStoreClient _client = new(TestData.Catalogue());

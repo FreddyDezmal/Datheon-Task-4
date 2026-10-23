@@ -103,7 +103,9 @@ Checked with a headless browser at 320, 375, 768, 1024 and 1440 px (screenshots 
 
 ## 7. Tests
 
-`npm test` runs 98 Vitest + Testing Library tests against a fake `fetch` (`src/test/fixtures.ts`). The fake returns the real API's response shapes, recorded from the running backend. These mocks exist only in tests; the app has no mock mode.
+**Current test strategy, commands, counts and coverage: see [`Testing.md`](Testing.md).** What follows records the state when this frontend round was finished.
+
+`npm test` ran 98 Vitest + Testing Library tests (230 after the testing round) against a fake `fetch` (`src/test/fixtures.ts`). The fake returns the real API's response shapes, recorded from the running backend. These mocks exist only in tests; the app has no mock mode.
 
 Mutation check: 13 safeguards were broken one at a time.
 - **Caught (11):** renew-and-retry on 401, ending a rejected session, no guest fallback, the bearer header, the uncertain-outcome message, replay detection, key rotation, `Retry-After`, keeping the access token out of storage, URL cleanup, duplicate-email mapping.

@@ -6,7 +6,6 @@ namespace Storefront.Api.Controllers;
 
 [ApiController]
 [Route("api/categories")]
-[Produces("application/json")]
 public sealed class CategoriesController(IProductCatalogService catalogService) : ControllerBase
 {
     /// <summary>

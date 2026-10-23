@@ -1,7 +1,9 @@
+using Storefront.Api.Tests.TestSupport;
 using Storefront.Api.Services;
 
 namespace Storefront.Api.Tests.Catalogue;
 
+[Trait("Category", TestCategories.Unit)]
 public class CategoryNormalizerTests
 {
     [Theory]

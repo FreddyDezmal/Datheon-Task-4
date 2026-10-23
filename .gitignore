@@ -26,3 +26,8 @@ backend/**/App_Data/
 
 # Lazy
 ClaudeOutputs/
+
+# Test output (regenerated on every run)
+frontend/playwright-report/
+frontend/e2e/.results/
+frontend/e2e/.data/

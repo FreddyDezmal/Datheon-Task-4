@@ -1,8 +1,10 @@
+using Storefront.Api.Tests.TestSupport;
 using Microsoft.Extensions.Configuration;
 using Storefront.Api.Configuration;
 
 namespace Storefront.Api.Tests.Configuration;
 
+[Trait("Category", TestCategories.Unit)]
 public class CorsSettingsTests
 {
     private static CorsSettings Bind(params string[] origins)

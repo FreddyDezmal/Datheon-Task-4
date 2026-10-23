@@ -6,6 +6,7 @@ using Storefront.Api.Tests.TestSupport;
 
 namespace Storefront.Api.Tests.FakeStore;
 
+[Trait("Category", TestCategories.Unit)]
 public class FakeStoreClientTests
 {
     private const string TwoProducts = """
