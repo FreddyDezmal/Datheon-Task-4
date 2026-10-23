@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Storefront.Api.Data;
 using Storefront.Api.Exceptions;
@@ -157,7 +156,7 @@ public sealed class GlobalExceptionHandler(
             },
             "CONSTRAINT_CONFLICT"),
 
-        DbUpdateException or SqliteException => WithCode(
+        _ when DatabaseErrors.IsDatabaseException(exception) => WithCode(
             new ProblemDetails
             {
                 Status = StatusCodes.Status500InternalServerError,

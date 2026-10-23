@@ -1,0 +1,42 @@
+# Build context is backend/. The image needs only Storefront.Api's sources.
+
+# Build and test output
+**/bin/
+**/obj/
+**/TestResults/
+**/coverage*/
+Storefront.Api.Tests/
+coverage.runsettings
+
+# Local databases (the container uses PostgreSQL)
+**/App_Data/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.db-journal
+**/*.sqlite
+
+# Secrets and production or machine-specific settings: supply these as environment variables
+**/.env
+**/.env.*
+**/appsettings.Production.json
+**/appsettings.*.local.json
+**/secrets.json
+**/*.pfx
+**/*.p12
+**/*.pem
+**/*.key
+**/Properties/launchSettings.json
+
+# Tooling and editor files
+.config/
+**/.vs/
+**/.vscode/
+**/.idea/
+**/*.user
+**/*.swp
+**/*.http
+.git/
+.gitignore
+Dockerfile
+.dockerignore

@@ -19,6 +19,7 @@ The step-by-step human checklist is in [`Testing/ManualTestPlan.md`](Testing/Man
 | **Backend unit** | Pricing, validation, category rules, the FakeStore client, error-to-ProblemDetails mapping | In-memory objects; a stub HTTP handler | xUnit | `[Trait("Category","Unit")]` | Nothing |
 | **Backend database** | Checkout and order queries against a real SQLite database built by the real migrations: constraints, transactions, unique indexes, idempotency races | SQLite in memory or a temp file | xUnit | `[Trait("Category","Database")]` | Nothing |
 | **Backend API** | The whole ASP.NET Core pipeline: routing, binding, authentication (including real token expiry with a test clock), authorization, rate limits, ProblemDetails, CORS, security headers | `WebApplicationFactory` with its own temp SQLite file and an in-memory catalogue | xUnit | `[Trait("Category","Api")]` | Nothing |
+| **Backend PostgreSQL** | Migrations and schema, health, checkout idempotency (replay, changed details, concurrent same-key submissions, the insert race), outcomes with failures injected before, at and after COMMIT, accounts and lockout, persistence across an app restart | A real PostgreSQL server; each test creates and drops its own database | xUnit | `[Trait("Category","PostgreSql")]` | `STOREFRONT_TEST_POSTGRES` pointing at a **disposable** server. Skipped, with the reason, when it isn't set. |
 | **Browser (end-to-end)** | Shopper journeys, layout at five widths, an axe accessibility scan, and keyboard paths, in real Chromium against the real API and database | Real API on :5081 (fresh SQLite file), Vite on :5174, `tools/fakestore_mock.py` on :9101 | Playwright + `@axe-core/playwright` | `frontend/e2e/*.spec.ts` | .NET SDK, Python 3, Playwright's Chromium |
 | **API smoke test** | Every endpoint of a running API, 200 repriced checkouts, outage modes | A running API (live FakeStoreAPI or the mock) | Python | `tools/smoke_test.py` | A running API |
 | **Manual** | Real phones, screen readers, zoom, high contrast, slow networks | People | Checklist | `Documentation/Testing/ManualTestPlan.md` | A tester |
@@ -51,6 +52,7 @@ cd frontend; npm ci; npm run typecheck; npm run build; npm test; npx playwright 
 | Frontend component and workflow | `npm run test:component` (frontend) |
 | All Vitest tests | `npm test` (frontend) |
 | Backend unit | `dotnet test -c Release --filter Category=Unit` (backend) |
+| Backend PostgreSQL | set `STOREFRONT_TEST_POSTGRES` (e.g. `Host=localhost;Port=55433;Username=postgres;Password=…`), then `dotnet test -c Release --filter Category=PostgreSql` (backend) |
 | Backend database | `dotnet test -c Release --filter Category=Database` (backend) |
 | Backend API | `dotnet test -c Release --filter Category=Api` (backend) |
 | All xUnit tests | `dotnet test -c Release` (backend) |

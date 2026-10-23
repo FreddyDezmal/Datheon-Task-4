@@ -69,7 +69,7 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 | HTTPS | Outside Development: `UseHsts()` (1 year) and `UseHttpsRedirection()`. Development stays on `http://localhost:5080` for the Vite dev server. |
 | CORS | Only the configured origins; methods GET and POST; headers `Content-Type`, `Accept`, `Authorization`, `Idempotency-Key`, `X-Correlation-Id`. Exposes `Idempotent-Replayed`, `Retry-After`, `X-Correlation-Id` and `Catalogue-Stale`. |
 | Host filtering | `AllowedHosts: localhost;127.0.0.1`. Other `Host` headers get 400. |
-| Secrets | None in the repository. SQLite has no password; Data Protection keys are created in the user profile at runtime. |
+| Secrets | None in the repository. SQLite has no password. The Data Protection keys that sign tokens are created at runtime and stored in the app database (`DataProtectionKeys`), unencrypted (see `Deployment.md`). |
 | Development vs production | `appsettings.Development.json` turns on migrations at startup and allows `127.0.0.1:5173`; everything else defaults to the stricter setting. |
 
 ### Not implemented (deliberately, and documented)
@@ -77,7 +77,7 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 - **No login UI in the frontend.** Accounts work through the API (Swagger or curl); the frontend keeps checking out as a guest.
 - **No email confirmation or password-reset delivery.** No email sender is configured, so `RequireConfirmedAccount` is off and Identity's default no-op sender is used.
 - **No roles or admin area.** Nothing in the current scope needs one.
-- **Production must persist Data Protection keys** (see the checklist below). Otherwise tokens stop working whenever keys are lost, such as on a new container.
+- **Data Protection keys are kept in the app database**, so tokens keep working across restarts, new containers and multiple instances. They aren't encrypted at rest, so anyone who can read `DataProtectionKeys` could forge tokens. Protect database access accordingly.
 
 ## 3. Database
 
@@ -113,11 +113,14 @@ SQLite is a single file with no server to install, so a fresh checkout runs with
 ```bash
 cd backend
 dotnet tool restore                                    # dotnet-ef 10.0.13, pinned in .config/dotnet-tools.json
-dotnet ef database update --project Storefront.Api     # create or upgrade App_Data/storefront.db
-dotnet ef migrations add <Name> --project Storefront.Api --output-dir Data/Migrations   # after changing the model
+dotnet ef database update --project Storefront.Api --context StorefrontDbContext     # create or upgrade App_Data/storefront.db
+# after changing the model, one migration per provider:
+dotnet ef migrations add <Name> --project Storefront.Api --context StorefrontDbContext --output-dir Data/Migrations
+dotnet ef migrations add <Name> --project Storefront.Api --context PostgreSqlStorefrontDbContext --output-dir Data/Migrations/PostgreSql
 ```
 
-- **Location:** `ConnectionStrings:Storefront` defaults to `Data Source=App_Data/storefront.db`, resolved against the `Storefront.Api` folder. The file is git-ignored.
+- **Providers:** SQLite for development and tests, PostgreSQL for production, chosen by `Database:Provider` with no default (see `Deployment.md`). The two have separate migration sets, because generated migrations aren't portable between providers.
+- **Location:** in Development, `ConnectionStrings:Storefront` is `Data Source=App_Data/storefront.db` (from `appsettings.Development.json`), resolved against the `Storefront.Api` folder. The file is git-ignored.
 - **Development:** applies pending migrations at startup (`Database:ApplyMigrationsOnStartup`).
 - **Reset:** stop the API and delete the `.db` file; the next start (or `dotnet ef database update`) recreates an empty database.
 - **Inspect:** open the file with any SQLite viewer. `AspNetUsers.PasswordHash` holds hashes only.
@@ -156,11 +159,11 @@ All errors are RFC 7807 `application/problem+json` with `status`, `title`, `trac
 
 ## 5. Production checklist (not done here)
 
-- Persist and protect the Data Protection key ring (`AddDataProtection().PersistKeysTo…().ProtectKeysWith…()`). Bearer tokens depend on it.
-- Behind a reverse proxy, enable `UseForwardedHeaders`, so rate limits and HTTPS detection see the real client.
+- The Data Protection key ring is persisted to the database (done). Still to do: encrypt it at rest (`ProtectKeysWithCertificate` or a key vault) once a certificate or vault is available on the platform.
+- Behind a reverse proxy, set `ForwardedHeaders` (off by default) once the right header and hop count are confirmed on the platform (`Deployment.md`, section 7), so rate limits and HTTPS detection see the real client.
 - Set `AllowedHosts` and `Cors:AllowedOrigins` to the real host and origin.
 - For more than one server or instance, move from SQLite to a server database (change the provider and regenerate migrations), or keep a single instance.
-- Apply migrations deliberately (`dotnet ef database update` or a migration bundle) rather than at startup.
+- Apply migrations deliberately, following the reviewed-script procedure in `Deployment.md`, rather than at startup.
 - Add an email sender and turn on `RequireConfirmedAccount`, if accounts become customer-facing.
 - Point liveness and readiness probes at `/health/live` and `/health/ready`; ship logs and alert on readiness 503 (see `Availability.md`).
 - Consider a circuit breaker (`Microsoft.Extensions.Http.Resilience`) on top of the existing bounded retries if FakeStoreAPI outages are long.

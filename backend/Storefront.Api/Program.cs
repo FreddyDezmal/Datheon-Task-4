@@ -106,6 +106,9 @@ builder.Services.AddCors(options => options.AddPolicy(CorsSettings.PolicyName, p
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// Read and validated before the app is built, so a bad value stops startup.
+var forwardedHeaders = ForwardedHeadersSettings.Read(builder.Configuration);
+
 var app = builder.Build();
 
 if (corsSettings.AllowedOrigins.Length == 0)
@@ -123,7 +126,11 @@ app.Lifetime.ApplicationStopping.Register(() => app.Logger.LogInformation(
     "Storefront API stopping: readiness now reports unavailable; finishing in-flight requests."));
 app.Lifetime.ApplicationStopped.Register(() => app.Logger.LogInformation("Storefront API stopped."));
 
-// First, so every later log line (including unhandled-exception logs) carries the request's ID.
+// Before anything that uses the client address or scheme (rate limiting, HSTS, HTTPS redirection).
+app.UseStorefrontForwardedHeaders(forwardedHeaders);
+
+// First of the app's own middleware, so every later log line (including unhandled-exception logs)
+// carries the request's ID.
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseExceptionHandler();
 app.UseStatusCodePages();

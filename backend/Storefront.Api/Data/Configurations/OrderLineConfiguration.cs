@@ -4,7 +4,7 @@ using Storefront.Api.Data.Entities;
 
 namespace Storefront.Api.Data.Configurations;
 
-public sealed class OrderLineConfiguration : IEntityTypeConfiguration<OrderLine>
+public sealed class OrderLineConfiguration(bool isSqlite) : IEntityTypeConfiguration<OrderLine>
 {
     public void Configure(EntityTypeBuilder<OrderLine> line)
     {
@@ -12,8 +12,8 @@ public sealed class OrderLineConfiguration : IEntityTypeConfiguration<OrderLine>
         {
             table.HasCheckConstraint("CK_OrderLines_Quantity_Positive", "\"Quantity\" > 0");
             table.HasCheckConstraint("CK_OrderLines_ProductId_Positive", "\"ProductId\" > 0");
-            table.HasCheckConstraint("CK_OrderLines_UnitPrice_NonNegative", "CAST(\"UnitPrice\" AS REAL) >= 0");
-            table.HasCheckConstraint("CK_OrderLines_LineTotal_NonNegative", "CAST(\"LineTotal\" AS REAL) >= 0");
+            table.HasCheckConstraint("CK_OrderLines_UnitPrice_NonNegative", OrderConfiguration.NonNegative("UnitPrice", isSqlite));
+            table.HasCheckConstraint("CK_OrderLines_LineTotal_NonNegative", OrderConfiguration.NonNegative("LineTotal", isSqlite));
         });
 
         line.Property(l => l.Title).HasMaxLength(500);

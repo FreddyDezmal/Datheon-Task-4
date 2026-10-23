@@ -19,15 +19,21 @@ public enum FaultStage
 /// Throws a real SqliteException with the given result code, once, at the chosen stage of the next
 /// order write. Lets tests check how each failure is reported against what actually reached the database.
 /// </summary>
-internal sealed class DatabaseFault(FaultStage stage, int sqliteErrorCode) : DbTransactionInterceptor, IDbCommandInterceptor
+internal sealed class DatabaseFault(FaultStage stage, Func<Exception> makeException) : DbTransactionInterceptor, IDbCommandInterceptor
 {
+    /// <summary>A real SqliteException with this result code.</summary>
+    public DatabaseFault(FaultStage stage, int sqliteErrorCode)
+        : this(stage, () => new SqliteException($"Injected SQLite error {sqliteErrorCode}.", sqliteErrorCode))
+    {
+    }
+
     /// <summary>Off until the test arms it, so startup (migrations commit transactions too) is unaffected.</summary>
     public bool Armed { get; set; }
 
-    private SqliteException Fire()
+    private Exception Fire()
     {
         Armed = false;
-        return new SqliteException($"Injected SQLite error {sqliteErrorCode}.", sqliteErrorCode);
+        return makeException();
     }
 
     public ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(

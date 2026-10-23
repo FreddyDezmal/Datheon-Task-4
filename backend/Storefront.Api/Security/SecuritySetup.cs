@@ -1,4 +1,5 @@
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
 using Storefront.Api.Data;
@@ -8,6 +9,8 @@ namespace Storefront.Api.Security;
 
 public static class SecuritySetup
 {
+    public const string DataProtectionApplicationName = "Storefront.Api";
+
     /// <summary>
     /// Accounts use ASP.NET Core Identity with its built-in API endpoints (MapIdentityApi):
     /// PBKDF2 password hashing, lockout after repeated failures, and Identity's own bearer tokens
@@ -17,6 +20,13 @@ public static class SecuritySetup
     /// </summary>
     public static IServiceCollection AddStorefrontAuthentication(this IServiceCollection services)
     {
+        // The key ring lives in the app database (DataProtectionKeys), not in the container's home
+        // folder, which is replaced on every deploy and would sign every shopper out. A fixed
+        // application name lets every instance share the keys, whatever folder it runs from.
+        services.AddDataProtection()
+            .SetApplicationName(DataProtectionApplicationName)
+            .PersistKeysToDbContext<StorefrontDbContext>();
+
         services.AddIdentityApiEndpoints<StorefrontUser>(options =>
             {
                 options.User.RequireUniqueEmail = true;

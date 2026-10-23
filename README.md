@@ -191,12 +191,14 @@ In Development the API applies pending migrations when it starts, so `dotnet run
 ```bash
 cd storefront/backend
 dotnet tool restore
-dotnet ef database update --project Storefront.Api
+dotnet ef database update --project Storefront.Api --context StorefrontDbContext
 ```
 
+The project has two database contexts (SQLite here, PostgreSQL for production), so every `dotnet ef` command needs `--context`. Production uses PostgreSQL; see `Documentation/Deployment.md`.
+
 - **Inspect** the file with any SQLite viewer (for example "DB Browser for SQLite", or the SQLite extension for VS Code). Tables: `Orders`, `OrderLines`, `AspNetUsers` (password hashes only, never plain text) and the other Identity tables.
-- **Reset** local data: stop the API, delete `backend/Storefront.Api/App_Data/storefront.db`, then start the API again (or run `dotnet ef database update`). The file is git-ignored and never committed.
-- **Change the model**: edit an entity or its configuration in `Data/`, then `dotnet ef migrations add <Name> --project Storefront.Api --output-dir Data/Migrations`, and commit the generated migration. A test fails if the model and migrations ever drift apart.
+- **Reset** local data: stop the API, delete `backend/Storefront.Api/App_Data/storefront.db`, then start the API again (or run the `dotnet ef database update` command above). The file is git-ignored and never committed.
+- **Change the model**: edit an entity or its configuration in `Data/`, then add a migration for **each** provider (`--context StorefrontDbContext --output-dir Data/Migrations` and `--context PostgreSqlStorefrontDbContext --output-dir Data/Migrations/PostgreSql`; see `Documentation/Deployment.md`), and commit both. Tests fail if either set drifts from the model.
 
 ### Accounts (optional)
 
@@ -277,7 +279,6 @@ The exit code is non-zero if any check fails.
 ```json
 {
   "AllowedHosts": "localhost;127.0.0.1",
-  "ConnectionStrings": { "Storefront": "Data Source=App_Data/storefront.db" },
   "Database": { "ApplyMigrationsOnStartup": false },
   "RateLimiting": { "AccountPermitLimit": 10, "CheckoutPermitLimit": 30, "WindowSeconds": 60 },
   "FakeStore": {
@@ -285,6 +286,7 @@ The exit code is non-zero if any check fails.
     "RetryCount": 2, "RetryBaseDelayMilliseconds": 200, "CatalogueCacheSeconds": 300, "StaleCatalogueMaxMinutes": 60
   },
   "Hosting": { "ShutdownTimeoutSeconds": 30 },
+  "ForwardedHeaders": { "Enabled": false, "ClientAddressHeader": "X-Forwarded-For", "TrustedProxyHops": 1 },
   "Pricing": {
     "Currency": "USD", "Locale": "en-US", "TaxRate": 0.08,
     "FlatShippingFee": 5.99, "FreeShippingThreshold": 50.00,
@@ -296,7 +298,8 @@ The exit code is non-zero if any check fails.
 
 Options are validated at startup (`ValidateOnStart`), so an invalid URL, a tax rate with more than 4 decimal places, or a negative fee stops the app with a clear message.
 
-- **Database:** a relative `Data Source` is resolved against the `Storefront.Api` folder, wherever the app is started from. `ApplyMigrationsOnStartup` is `true` in `appsettings.Development.json` only.
+- **Database:** `Database:Provider` (`Sqlite` or `PostgreSql`) and `ConnectionStrings:Storefront` have **no defaults** in `appsettings.json`. `appsettings.Development.json` sets `Sqlite` with `Data Source=App_Data/storefront.db`, resolved against the `Storefront.Api` folder. Any other environment must set both (e.g. `Database__Provider=PostgreSql`), or the app refuses to start. `ApplyMigrationsOnStartup` is `true` in Development only. Production setup, the PostgreSQL migration procedure and the container image are in `Documentation/Deployment.md`.
+- **Behind a reverse proxy**, enable `ForwardedHeaders` so rate limits see each client's address and HTTPS is recognised. It's off by default because a forwarded header can be forged unless the app is reachable only through the proxy; see `Documentation/Deployment.md`, section 7.
 - **Rate limits** are per client IP and per window: `AccountPermitLimit` covers all `/api/account/*` endpoints, `CheckoutPermitLimit` covers `POST /api/checkout`. Over the limit returns 429 with `Retry-After`.
 - **AllowedHosts** rejects requests for other host names (400). Set your real host name in production, for example `AllowedHosts=shop.example.com`, and include the host name a health probe uses.
 - **FakeStore retries and fallback, shutdown and logging:** see `Documentation/Availability.md`. Logs are JSON outside Development and readable text in Development.
@@ -311,7 +314,7 @@ VITE_DEFAULT_CURRENCY=USD
 VITE_DEFAULT_LOCALE=en-US
 ```
 
-No secrets are needed anywhere: FakeStoreAPI is public, there is no payment provider, and SQLite needs no password. Identity's tokens are signed with ASP.NET Core's Data Protection keys, which are created automatically in your user profile; in production they must be persisted and protected (see `Documentation/Backend.md`).
+No secrets are needed anywhere: FakeStoreAPI is public, there is no payment provider, and SQLite needs no password. Identity's tokens are signed with ASP.NET Core's Data Protection keys, which are created automatically and stored in the app database, so sign-ins survive restarts and new containers. They aren't encrypted at rest (see `Documentation/Deployment.md`).
 
 ---
 
@@ -468,15 +471,15 @@ Responsive: layouts were checked at 320, 375, 768, 1024 and 1440 px wide with no
 - Behind a corporate proxy, set `HTTPS_PROXY` for the API process.
 
 **Database errors.**
-- `SQLite Error 1: 'no such table: Orders'` (500 `DATABASE_ERROR`): migrations haven't run, which happens outside Development. Run `dotnet ef database update --project Storefront.Api` from `backend/`.
+- `SQLite Error 1: 'no such table: Orders'` (500 `DATABASE_ERROR`): migrations haven't run, which happens outside Development. Run `dotnet ef database update --project Storefront.Api --context StorefrontDbContext` from `backend/`.
 - 503 `DATABASE_BUSY`: another process (often a SQLite viewer holding a write transaction) has the file locked. Close it and retry.
 - 503 `DATABASE_UNAVAILABLE`: the SQLite file can't be opened (missing folder, permissions or disk). `/health/ready` also reports 503.
 - A shopper quoted a **Reference**: search the API log for it (`Documentation/Availability.md`, section 5).
 - To start over, stop the API and delete `backend/Storefront.Api/App_Data/storefront.db`.
 
-**Signed out unexpectedly, or "Your session has expired".** Sessions last for the browser tab; closing the tab signs you out. Restarting the API keeps sessions only if its Data Protection keys survive (they do by default on a developer machine).
+**Signed out unexpectedly, or "Your session has expired".** Sessions last for the browser tab; closing the tab signs you out. Restarting the API keeps sessions: the Data Protection keys are stored in the database. Deleting the database (or its `DataProtectionKeys` rows) ends every session.
 
-**401 on `/api/orders`.** Send the `accessToken` from `/api/account/login` as `Authorization: Bearer <token>`. Tokens expire after an hour; use `/api/account/refresh` or sign in again. If you clear your user profile's Data Protection keys, existing tokens stop working.
+**401 on `/api/orders`.** Send the `accessToken` from `/api/account/login` as `Authorization: Bearer <token>`. Tokens expire after an hour; use `/api/account/refresh` or sign in again. If the `DataProtectionKeys` rows are deleted, existing tokens stop working.
 
 **429 Too Many Requests.** The per-client limits are 10 account requests and 30 checkouts per minute. Raise them with `RateLimiting__AccountPermitLimit` and `RateLimiting__CheckoutPermitLimit` for load or smoke testing.
 

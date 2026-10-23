@@ -16,7 +16,12 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.3.1" />
     <!-- EF Core and Identity versions track the ASP.NET Core 10 runtime patch. -->
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.13" />
+    <!-- Stores the Data Protection key ring (which signs bearer and refresh tokens) in the app database,
+         so sign-ins survive new containers and are shared by every instance. -->
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.13" />
+    <!-- PostgreSQL for production. 10.0.x is the line built for EF Core 10 (needs EF Core >= 10.0.4). -->
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <!-- Design-time only: used by `dotnet ef` to create migrations; not shipped with the app. -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13">
       <PrivateAssets>all</PrivateAssets>

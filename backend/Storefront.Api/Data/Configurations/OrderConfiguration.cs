@@ -4,8 +4,15 @@ using Storefront.Api.Data.Entities;
 
 namespace Storefront.Api.Data.Configurations;
 
-public sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
+public sealed class OrderConfiguration(bool isSqlite) : IEntityTypeConfiguration<Order>
 {
+    /// <summary>
+    /// "column >= 0" for a decimal column. SQLite stores decimals as TEXT, so it must CAST to compare
+    /// numerically; PostgreSQL stores them as exact numeric and compares them directly.
+    /// </summary>
+    internal static string NonNegative(string column, bool isSqlite) =>
+        isSqlite ? $"CAST(\"{column}\" AS REAL) >= 0" : $"\"{column}\" >= 0";
+
     public const int ReferenceMaxLength = 32;
     public const int IdempotencyKeyMaxLength = 100;
 
@@ -13,11 +20,10 @@ public sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
     {
         order.ToTable("Orders", table =>
         {
-            // SQLite stores decimals as TEXT, so numeric checks must CAST to compare correctly.
-            table.HasCheckConstraint("CK_Orders_Subtotal_NonNegative", "CAST(\"Subtotal\" AS REAL) >= 0");
-            table.HasCheckConstraint("CK_Orders_Tax_NonNegative", "CAST(\"Tax\" AS REAL) >= 0");
-            table.HasCheckConstraint("CK_Orders_Shipping_NonNegative", "CAST(\"Shipping\" AS REAL) >= 0");
-            table.HasCheckConstraint("CK_Orders_Total_NonNegative", "CAST(\"Total\" AS REAL) >= 0");
+            table.HasCheckConstraint("CK_Orders_Subtotal_NonNegative", NonNegative("Subtotal", isSqlite));
+            table.HasCheckConstraint("CK_Orders_Tax_NonNegative", NonNegative("Tax", isSqlite));
+            table.HasCheckConstraint("CK_Orders_Shipping_NonNegative", NonNegative("Shipping", isSqlite));
+            table.HasCheckConstraint("CK_Orders_Total_NonNegative", NonNegative("Total", isSqlite));
         });
 
         order.Property(o => o.Reference).HasMaxLength(ReferenceMaxLength);
@@ -31,7 +37,8 @@ public sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
         order.HasIndex(o => o.IdempotencyKey).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
         order.Property(o => o.RequestFingerprint).HasMaxLength(64);
 
-        // SQLite has no time zone type; values are written as UTC and read back marked as UTC.
+        // Always UTC. SQLite has no time zone type, so values are read back marked as UTC; PostgreSQL
+        // stores timestamp with time zone, and Npgsql only accepts DateTimeKind.Utc for it.
         order.Property(o => o.CreatedAtUtc)
             .HasConversion(v => v, v => DateTime.SpecifyKind(v, DateTimeKind.Utc));
 
