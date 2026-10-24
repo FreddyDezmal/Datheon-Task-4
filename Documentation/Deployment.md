@@ -31,8 +31,8 @@ Production settings, as environment variables:
 | `PORT` | set by Render | The image falls back to 10000 |
 | `ASPNETCORE_ENVIRONMENT` | `Production` | Already the image default |
 | `Database__ApplyMigrationsOnStartup` | leave unset (`false`) | Migrations are applied separately (section 3) |
-| `ForwardedHeaders__Enabled` | `false` at first; `true` once section 7's check passes | Off: client addresses and HTTPS aren't taken from proxy headers |
-| `ForwardedHeaders__ClientAddressHeader` | `X-Forwarded-For` (default) or e.g. `True-Client-IP` | Whichever header section 7 shows Render controls |
+| `ForwardedHeaders__Enabled` | `true` on Render (*verified*, section 7) | Off: client addresses and HTTPS aren't taken from proxy headers |
+| `ForwardedHeaders__ClientAddressHeader` | **`CF-Connecting-IP`** on Render. **Not** `X-Forwarded-For`, which is forgeable there. | The header Render's edge sets and clients can't supply |
 | `ForwardedHeaders__TrustedProxyHops` | `1` (default) | How many right-most entries of that header come from Render's proxies (1–5) |
 
 ## 2. Schema review: SQLite vs PostgreSQL
@@ -151,6 +151,7 @@ docker build --pull --no-cache -t storefront-api backend   # also re-runs the CA
 | Restart persistence | same | After SIGTERM (graceful shutdown logged) and a restart: orders, accounts and the idempotent replay were intact. **After a "new container"** (fresh home folder): first data intact but the old sign-in token **rejected (401)**. **After the key-ring change:** the access token (200) and refresh token (200) were both accepted, with one key in PostgreSQL and none on disk. |
 | Upgrade procedure (section 3) | same | On the database migrated earlier, the regenerated idempotent script applied only `AddDataProtectionKeys`. Until step 5's grants were re-run, the app role got "permission denied for table DataProtectionKeys", which is why that step must follow every migration that adds a table. |
 | `docker build` and the image itself | owner's Windows machine, Docker Desktop, 23 October 2026 (it couldn't be built in the workspace, where both registries are blocked) | **Passed**: builds and runs as `uid=1654(app)`, entrypoint `exec dotnet Storefront.Api.dll --urls http://0.0.0.0:${PORT:-10000}`, `ASPNETCORE_ENVIRONMENT=Production`. The idempotent migration script applied to a `postgres:16` container and re-applied as a no-op. `/health/live` and `/health/ready` 200. CORS allowed and refused origins correctly. Smoke test against live FakeStoreAPI: 57 passed, 0 failed, 2 skipped (Swagger; failure modes without the mock). Orders: 205 before and after `docker restart`, and 205 in a **new container**. `docker stop` logged a graceful shutdown. The Data Protection warning about keys not surviving the container appeared, as expected (blocker 1). |
+| **Live on Render** (`datheon-task-4.onrender.com`, Free instance with Free PostgreSQL, Frankfurt, 24 October 2026) | Render | Migrations applied with the reviewed script (both listed in `__EFMigrationsHistory`). `/health/live` and `/health/ready` 200, database Healthy. Smoke test against live FakeStoreAPI: first **45 passed, 12 failed**, every failure a **429** from the per-client checkout limit (30 a minute), which confirms per-shopper limits in production. With limits raised temporarily: **57 passed, 0 failed, 2 skipped** (Swagger; failure modes without the mock), covering repricing, validation, idempotent replay and key reuse, accounts, signed-in orders, token refresh and CORS. Client-address setting measured as in section 7. |
 | PostgreSQL tests against Docker's PostgreSQL | owner's machine | **First run: 17 of 18.** One case (connection lost just before COMMIT) failed after 50 s at an order-count query; the error message wasn't captured. **Two further full runs** (via `localhost` and via `127.0.0.1`): **18 of 18 each**. It passed 6 of 6 repeated runs in the workspace, and checks showed no lingering transactions or locks after any injected failure. **Cause not established**: it looks like a slow test connection (that test opens the most fresh, unpooled connections, and was again the slowest, at 12 s via `localhost`), but that's unconfirmed. If it recurs, rerun with the `trx` logger to capture the message. |
 
 How to run the PostgreSQL tests against any disposable server (never a production one):
@@ -174,7 +175,7 @@ Each test creates its own `storefront_test_<guid>` database and drops it afterwa
    - **Render's health checks** send the service's `onrender.com` subdomain as the `Host` header, or a verified custom domain once one exists ([Render: Health Checks](https://render.com/docs/health-checks)). So set `AllowedHosts` to that subdomain (e.g. `storefront-api.onrender.com`), and add any custom domain, separated by `;`, **before** verifying it.
    - A wrong value fails safely. The health check gets 400, which Render counts as a failure, so the deploy is cancelled and the previous version keeps serving.
    - **Health check path:** use `/health/ready`. A deploy then only goes live once the database is reachable and migrated, and an outage at FakeStoreAPI alone doesn't fail it (it reports `Degraded`, which is 200). Trade-off: while the database is down, the check fails too, and Render may restart instances that couldn't serve anyway.
-3. **Client addresses behind Render's proxy: the setting exists, and the right values still have to be measured on Render** (section 7).
+3. ~~**Client addresses behind Render's proxy.**~~ **Resolved on Render (24 October 2026): `ForwardedHeaders__Enabled=true` with `ForwardedHeaders__ClientAddressHeader=CF-Connecting-IP`.** `X-Forwarded-For` turned out to be forgeable there. Results are in section 7.
    - Without it, every shopper shares the proxy's address and so one rate limit (10 sign-in requests and 30 checkouts a minute in total), and the API can't tell that a request arrived over HTTPS (no HSTS).
    - The `ForwardedHeaders` setting is **off by default** (*verified*: claimed addresses are then ignored).
    - When on, the client address comes from a chosen header, counting a set number of trusted entries from the right, and the scheme from `X-Forwarded-Proto`.
@@ -200,4 +201,20 @@ The rate limit shows which address the API thinks a request came from: two reque
 4. When both checks pass, restore `RateLimiting__AccountPermitLimit` (default 10), keep the forwarding settings, and record the result here.
 
 If no combination passes both checks, leave forwarding **off**. Limits are then shared but can't be spoofed. Ask Render support which header it guarantees.
+
+### Results on Render (24 October 2026, `datheon-task-4.onrender.com`, Free instance, Frankfurt)
+
+Measured with `RateLimiting__AccountPermitLimit=1` and the sign-in endpoint, as above:
+
+| Test | Setting | Result | Meaning |
+|---|---|---|---|
+| Two requests claiming `X-Forwarded-For: 1.1.1.1`, then `2.2.2.2` | `X-Forwarded-For`, 1 hop | `400`, `400` | **Forgeable**: the client-supplied value was taken as the client's address |
+| Two plain requests; then two that both claim `1.1.1.1` | same | `400`, `429`; `400`, `429` | The limit works, which confirms the row above: the forged value is what gets used. Render keeps a client-supplied entry where this setting reads it (in line with Render staff saying the *first* entry is the real client). |
+| Two requests claiming `CF-Connecting-IP: 1.1.1.1`, then `2.2.2.2` | `CF-Connecting-IP` | `403`, `403` | Rejected at Render's edge, before the app, so clients **can't supply** this header |
+| One request from home, then one from a phone hotspot within a minute | same | `400`, `400` | Different networks are **different clients** |
+| Two plain requests from home | same | `400`, `429` | Repeated requests from one client are **the same client**: the header is present and consistent |
+
+**Decision:** `ForwardedHeaders__Enabled=true`, `ForwardedHeaders__ClientAddressHeader=CF-Connecting-IP`, `TrustedProxyHops=1`, and `RateLimiting__AccountPermitLimit` restored to the default (10).
+
+**Caveat:** this relies on Render's edge setting `CF-Connecting-IP` and rejecting client-supplied copies, which is how it behaved on this date. That isn't documented by Render. If Render stops setting the header, the API falls back to the proxy's address, so limits become shared but can't be spoofed. Re-run the last three tests after any change to Render networking or a move to a custom domain or another host.
 
