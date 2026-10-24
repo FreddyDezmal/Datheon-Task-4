@@ -69,7 +69,7 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 | HTTPS | Outside Development: `UseHsts()` (1 year) and `UseHttpsRedirection()`. Development stays on `http://localhost:5080` for the Vite dev server. |
 | CORS | Only the configured origins; methods GET and POST; headers `Content-Type`, `Accept`, `Authorization`, `Idempotency-Key`, `X-Correlation-Id`. Exposes `Idempotent-Replayed`, `Retry-After`, `X-Correlation-Id` and `Catalogue-Stale`. |
 | Host filtering | `AllowedHosts: localhost;127.0.0.1`. Other `Host` headers get 400. |
-| Secrets | None in the repository. SQLite has no password. The Data Protection keys that sign tokens are created at runtime and stored in the app database (`DataProtectionKeys`), unencrypted (see `Deployment.md`). |
+| Secrets | None in the repository. SQLite has no password. The Data Protection keys that sign tokens are created at runtime and stored in the app database (`DataProtectionKeys`). Outside Development they're encrypted with a certificate supplied as a secret (`DataProtection__Certificate__Pfx` and `__Password`); the API refuses to start without it (see `Deployment.md`, section 8). |
 | Development vs production | `appsettings.Development.json` turns on migrations at startup and allows `127.0.0.1:5173`; everything else defaults to the stricter setting. |
 
 ### Not implemented (deliberately, and documented)
@@ -77,7 +77,7 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 - **No login UI in the frontend.** Accounts work through the API (Swagger or curl); the frontend keeps checking out as a guest.
 - **No email confirmation or password-reset delivery.** No email sender is configured, so `RequireConfirmedAccount` is off and Identity's default no-op sender is used.
 - **No roles or admin area.** Nothing in the current scope needs one.
-- **Data Protection keys are kept in the app database**, so tokens keep working across restarts, new containers and multiple instances. They aren't encrypted at rest, so anyone who can read `DataProtectionKeys` could forge tokens. Protect database access accordingly.
+- **Data Protection keys are kept in the app database**, so tokens keep working across restarts, new containers and multiple instances. Outside Development each key is encrypted with a certificate before it's written, so a copy of the database alone can't forge tokens. Losing the certificate signs everyone out; it doesn't take the API down.
 
 ## 3. Database
 
@@ -159,7 +159,7 @@ All errors are RFC 7807 `application/problem+json` with `status`, `title`, `trac
 
 ## 5. Production checklist (not done here)
 
-- The Data Protection key ring is persisted to the database (done). Still to do: encrypt it at rest (`ProtectKeysWithCertificate` or a key vault) once a certificate or vault is available on the platform.
+- The Data Protection key ring is persisted to the database and encrypted at rest with a certificate (done; `Deployment.md`, section 8). A key vault would remove the certificate from the platform's environment settings.
 - Behind a reverse proxy, set `ForwardedHeaders` (off by default) once the right header and hop count are confirmed on the platform (`Deployment.md`, section 7), so rate limits and HTTPS detection see the real client.
 - Set `AllowedHosts` and `Cors:AllowedOrigins` to the real host and origin.
 - For more than one server or instance, move from SQLite to a server database (change the provider and regenerate migrations), or keep a single instance.

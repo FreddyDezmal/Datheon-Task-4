@@ -34,6 +34,10 @@ Production settings, as environment variables:
 | `ForwardedHeaders__Enabled` | `true` on Render (*verified*, section 7) | Off: client addresses and HTTPS aren't taken from proxy headers |
 | `ForwardedHeaders__ClientAddressHeader` | **`CF-Connecting-IP`** on Render. **Not** `X-Forwarded-For`, which is forgeable there. | The header Render's edge sets and clients can't supply |
 | `ForwardedHeaders__TrustedProxyHops` | `1` (default) | How many right-most entries of that header come from Render's proxies (1–5) |
+| `DataProtection__Certificate__Pfx` | contents of `storefront-data-protection.pfx.base64.txt` | **Required outside Development** (section 8). The certificate that encrypts the sign-in keys, as base64. Secret. |
+| `DataProtection__Certificate__Password` | the password chosen when creating it | Secret |
+| `DataProtection__PreviousCertificates__0__Pfx` / `__Password` | only while rotating | Decrypt-only: the certificate being replaced (section 8) |
+| `DataProtection__AllowUnencryptedKeys` | leave unset | `true` runs without a certificate and stores the keys readable. Only for throwaway local runs. |
 
 ## 2. Schema review: SQLite vs PostgreSQL
 
@@ -136,12 +140,15 @@ docker build --pull --no-cache -t storefront-api backend   # also re-runs the CA
 
   *Verified*: the context was listed with planted decoy files, and only sources, settings and both migration sets went in.
 
+**Running the image locally** now needs the Data Protection certificate too (section 8): pass `-e DataProtection__Certificate__Pfx=… -e DataProtection__Certificate__Password=…`, or, for a throwaway run only, `-e DataProtection__AllowUnencryptedKeys=true`. Without either, the container exits at startup with `DataProtection:Certificate:Pfx is required outside Development`. This applies to `verify-container.ps1` as well.
+
 ## 5. Verification
 
 | Check | Where | Result |
 |---|---|---|
 | Backend tests, SQLite (unit, database, API) | Linux workspace | **Passed**: 293 passed, 0 failed. The 14 PostgreSQL tests are skipped without a server, and say why. |
-| Backend tests, with PostgreSQL 16.15 | Linux workspace, disposable local server, password (SCRAM) auth | **Passed: 312 of 312** (302 before the key-ring and forwarded-header changes) |
+| Backend tests, with PostgreSQL 16.15 | Linux workspace, disposable local server | **Passed: 329 of 329** (312 before key encryption; 302 before the key-ring and forwarded-header changes) |
+| Key encryption, end to end | Linux workspace: the published API in Production on PostgreSQL, with a certificate made by `tools/new-data-protection-certificate.cs` | Without a certificate: startup refused with the message above. With it: the startup log names the certificate's thumbprint; register, sign-in and `/api/orders` 200; after a restart the same token 200; the key row in `DataProtectionKeys` is `<encryptedSecret>` and no "No XML encryptor" warning is logged. **A key written earlier without encryption stayed unencrypted and in use** until deleted, hence step 5 of section 8. Restarted with a different certificate: the old token 401, `/health/ready` 200. |
 | Deliberate breakages | same | Without PostgreSQL `23505` handling, 3 tests fail (including the double-click test). Without lost-connection classification, 2 fail. |
 | Migrations | disposable PostgreSQL database | `database update` applies the migration and a second run is a no-op. The idempotent script applies, and re-running it is a no-op. Schema inspected: numeric, timestamptz, partial unique index, check constraints. |
 | Frontend typecheck, build, Vitest with coverage | Linux workspace | **Passed**: 260/260, thresholds met (frontend unchanged) |
@@ -165,12 +172,12 @@ Each test creates its own `storefront_test_<guid>` database and drops it afterwa
 
 ## 6. Blockers and risks before going live
 
-1. ~~**Sign-in sessions don't survive a new container.**~~ **Resolved; one follow-up remains.**
+1. ~~**Sign-in sessions don't survive a new container.**~~ **Resolved, including the follow-up.**
    - **Was:** the Data Protection keys that sign bearer and refresh tokens lived in the container's home folder, which every deploy replaces. So every deploy signed all shoppers out (*verified*: 401 after a fresh key ring).
    - **Now:** the key ring is stored in the app database (`DataProtectionKeys` table, migration `AddDataProtectionKeys` for both providers) under the fixed application name `Storefront.Api`. Every instance and every new container uses the same keys.
      - *Verified on PostgreSQL:* after a restart with an empty home folder, the same access token (200) and refresh token (200) still worked, no key files were written to disk, and the "may not be persisted outside of the container" warning is gone.
      - *Verified by tests:* a new instance accepts earlier tokens, and once the keys are deleted from the database a new instance rejects them. Without the change, both tests fail.
-   - **Follow-up: the keys are stored unencrypted.** Data Protection still logs "No XML encryptor configured". Anyone who can read `DataProtectionKeys` could forge sign-in tokens, so treat that table like the password hashes: database credentials kept in the platform's secret store, no broad read access, and backups protected. Encrypting the keys at rest (for example `ProtectKeysWithCertificate`, with the certificate supplied as a secret) would remove this. It isn't implemented: it needs a certificate managed on the platform.
+   - ~~**Follow-up: the keys are stored unencrypted.**~~ **Resolved:** each key is now encrypted with a certificate before it's written (section 8), so a copy of the database alone can't forge sign-ins. Outside Development the app refuses to start without the certificate.
 2. **`AllowedHosts` must name the public host**, or every request gets 400. No code change is needed: it's the `AllowedHosts` environment variable, set when the Render service is created.
    - **Render's health checks** send the service's `onrender.com` subdomain as the `Host` header, or a verified custom domain once one exists ([Render: Health Checks](https://render.com/docs/health-checks)). So set `AllowedHosts` to that subdomain (e.g. `storefront-api.onrender.com`), and add any custom domain, separated by `;`, **before** verifying it.
    - A wrong value fails safely. The health check gets 400, which Render counts as a failure, so the deploy is cancelled and the previous version keeps serving.
@@ -218,3 +225,73 @@ Measured with `RateLimiting__AccountPermitLimit=1` and the sign-in endpoint, as 
 
 **Caveat:** this relies on Render's edge setting `CF-Connecting-IP` and rejecting client-supplied copies, which is how it behaved on this date. That isn't documented by Render. If Render stops setting the header, the API falls back to the proxy's address, so limits become shared but can't be spoofed. Re-run the last three tests after any change to Render networking or a move to a custom domain or another host.
 
+## 8. Encrypting the sign-in keys
+
+The Data Protection keys sign every bearer and refresh token. Stored readable, anyone who can read `DataProtectionKeys` (a leaked database URL, a backup) could forge a sign-in for any account. With a certificate configured, each key is encrypted with the certificate's public key before it's written (`ProtectKeysWithCertificate`), and only an app holding the private key can use it.
+
+- **Required outside Development.** Without `DataProtection:Certificate:Pfx` the app stops at startup and says how to fix it, rather than quietly writing readable keys. A value that isn't base64, a wrong password, a certificate without its private key, or an RSA key under 2048 bits also stop startup. The messages never include the certificate or the password. *Verified by tests.*
+- **Logged at startup:** `Sign-in keys are encrypted with certificate <thumbprint> (expires <date>)`. From 30 days before the expiry date there's also a warning to rotate. Expiry doesn't stop the certificate working; it's only the reminder.
+- **Development and the test suites** run without a certificate, as before.
+- **If the certificate is lost or replaced without rotating:** keys encrypted with it can't be read, so everyone is signed out and has to sign in again. Orders and accounts are unaffected and the API keeps serving (*verified*).
+
+### Creating the certificate
+
+From the repository root, on your own machine (it needs the .NET 10 SDK, nothing else):
+
+```powershell
+dotnet run tools/new-data-protection-certificate.cs
+```
+
+It asks for a password twice (at least 12 characters; nothing is shown as you type) and writes two files to `%USERPROFILE%\storefront-secrets` (or `-- <folder>`):
+
+| File | Use |
+|---|---|
+| `storefront-data-protection.pfx` | The certificate and private key, password-protected (AES-256). Your backup. |
+| `storefront-data-protection.pfx.base64.txt` | The same file as base64: the value of `DataProtection__Certificate__Pfx` |
+
+It's a self-signed, 3072-bit RSA certificate valid for 3 years, used only for this; no certificate authority is involved. The tool refuses a folder inside a git repository, never overwrites an existing certificate, adds nothing to the Windows certificate store, and prints nothing secret. Keep the `.pfx` and its password in a password manager. Never commit them, or paste them into chat or a ticket.
+
+### Turning it on (Render)
+
+The order matters, because the new version won't start without the certificate.
+
+1. **Create the certificate** as above.
+2. **Copy the value** to the clipboard without displaying it:
+   ```powershell
+   Get-Content "$env:USERPROFILE\storefront-secrets\storefront-data-protection.pfx.base64.txt" -Raw | Set-Clipboard
+   ```
+3. **Render → the service → Environment:** add `DataProtection__Certificate__Pfx` (paste), and `DataProtection__Certificate__Password`. Save. The version already running ignores both.
+4. **Deploy** the version with this change (push the commit). Check the deploy log for `Sign-in keys are encrypted with certificate <thumbprint>`, matching the thumbprint the tool printed. If a variable is missing or wrong, the new version stops at startup and Render keeps the previous one serving.
+5. **Replace the key written before encryption.** Existing keys aren't re-encrypted: a key created unencrypted stays readable, and in use, until it expires in up to 90 days (*verified*). Delete it, then restart, so the app creates a new, encrypted one. This signs everyone out once:
+   ```powershell
+   $db = Read-Host "Paste the External Database URL"
+   $db = "$db" + "?sslmode=require"
+   'DELETE FROM "DataProtectionKeys";' | docker run --rm -i postgres:16 psql $db -v ON_ERROR_STOP=1
+   ```
+   Then **Manual Deploy → Deploy latest commit** (or restart the service), and sign in once so that a key is created.
+6. **Verify** that every key is encrypted. The two numbers must be equal and at least 1:
+   ```powershell
+   'SELECT count(*) AS keys, count(*) FILTER (WHERE "Xml" LIKE ''%<encryptedSecret%'') AS encrypted FROM "DataProtectionKeys";' | docker run --rm -i postgres:16 psql $db
+   ```
+   Close the PowerShell window afterwards.
+
+### Rotating the certificate
+
+Before it expires, or straight away if the `.pfx` or its password may have leaked:
+
+1. Create a new certificate into **another folder** (`dotnet run tools/new-data-protection-certificate.cs -- <folder>`).
+2. On Render, move the current values to `DataProtection__PreviousCertificates__0__Pfx` and `DataProtection__PreviousCertificates__0__Password`, and put the new ones in `DataProtection__Certificate__Pfx` and `__Password`. Deploy. Existing sign-ins keep working (*verified by a test*), and new keys use the new certificate.
+3. Keep the previous certificate listed for **105 days**: the current key stays in use for up to 90 days, and refresh tokens it signed last 14 days. Then remove the two `PreviousCertificates` variables.
+
+**After a leak, don't wait:** skip step 3. Set only the new certificate, delete the rows in `DataProtectionKeys`, and restart, as in step 5 above. Everyone signs in again, but nothing signed with the leaked key is accepted any more.
+
+## 9. Free plan: replacing an expired database
+
+A Free Render PostgreSQL database expires 30 days after it's created and has no backups. When it expires, its data is gone and the API's readiness check fails. Upgrading to a paid plan before then keeps the data. Otherwise, set up a new one the same way:
+
+1. **Create** a new PostgreSQL database on Render, in the same region as the web service.
+2. **Apply the migrations** to it with the reviewed script, as in section 3 (steps 1, 2 and 4), using its **External** URL. Check that both migrations are listed in `__EFMigrationsHistory`.
+3. **Point the service at it:** update `ConnectionStrings__Storefront` with the new database's **Internal** details, in key=value format as before, including `;GSS Encryption Mode=Disable`. Saving redeploys.
+4. **Check** `/health/ready` is 200 with `"database":"Healthy"`.
+
+Orders and accounts from the old database are lost, and everyone signs in again (the sign-in keys lived in that database too). The Data Protection certificate doesn't change: the new keys are encrypted with it from the start, so step 5 of section 8 isn't needed.

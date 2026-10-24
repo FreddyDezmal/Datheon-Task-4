@@ -314,7 +314,7 @@ VITE_DEFAULT_CURRENCY=USD
 VITE_DEFAULT_LOCALE=en-US
 ```
 
-No secrets are needed anywhere: FakeStoreAPI is public, there is no payment provider, and SQLite needs no password. Identity's tokens are signed with ASP.NET Core's Data Protection keys, which are created automatically and stored in the app database, so sign-ins survive restarts and new containers. They aren't encrypted at rest (see `Documentation/Deployment.md`).
+No secrets are needed anywhere: FakeStoreAPI is public, there is no payment provider, and SQLite needs no password. Identity's tokens are signed with ASP.NET Core's Data Protection keys, which are created automatically and stored in the app database, so sign-ins survive restarts and new containers. Outside Development they're encrypted with a certificate you supply, and the API won't start without one (see `Documentation/Deployment.md`, "Encrypting the sign-in keys").
 
 ---
 

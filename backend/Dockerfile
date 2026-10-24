@@ -49,8 +49,8 @@ ENV ASPNETCORE_ENVIRONMENT=Production \
     PORT=10000
 EXPOSE 10000
 
-# The non-root user that ships with the .NET images (UID 1654). The app only writes to its home
-# directory (ASP.NET Core Data Protection keys); the database is PostgreSQL, not a local file.
+# The non-root user that ships with the .NET images (UID 1654). The app writes no files: the database
+# is PostgreSQL, and the Data Protection keys are stored in it, encrypted (Documentation/Deployment.md).
 USER $APP_UID
 
 # exec replaces the shell, so the API is PID 1 and receives SIGTERM directly for a graceful shutdown.

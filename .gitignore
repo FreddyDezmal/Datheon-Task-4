@@ -31,3 +31,8 @@ ClaudeOutputs/
 frontend/playwright-report/
 frontend/e2e/.results/
 frontend/e2e/.data/
+
+# Data Protection certificate (tools/new-data-protection-certificate.cs writes it outside the repo; this is a backstop)
+*.pfx
+*.pfx.base64.txt
+storefront-secrets/

@@ -52,7 +52,9 @@ builder.Services.AddHttpClient<IFakeStoreClient, FakeStoreClient>((services, cli
     .AddHttpMessageHandler<UpstreamRetryHandler>();
 
 // ---- Security ----
-builder.Services.AddStorefrontAuthentication();
+// Read and validated here, so a missing or unreadable certificate stops startup (outside Development).
+var dataProtectionCertificates = DataProtectionCertificates.Read(builder.Configuration, builder.Environment.IsDevelopment());
+builder.Services.AddStorefrontAuthentication(dataProtectionCertificates);
 builder.Services.AddStorefrontRateLimiting(builder.Configuration);
 builder.Services.AddHsts(options =>
 {
@@ -115,6 +117,8 @@ if (corsSettings.AllowedOrigins.Length == 0)
 {
     app.Logger.LogWarning("Cors:AllowedOrigins is empty, so browsers on other origins cannot call this API.");
 }
+
+app.LogDataProtectionKeyEncryption(dataProtectionCertificates);
 
 await app.ApplyMigrationsIfConfiguredAsync();
 

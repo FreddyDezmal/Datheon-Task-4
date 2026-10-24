@@ -351,6 +351,28 @@ public sealed class PostgreSqlTests
     }
 
     [PostgreSqlFact]
+    public async Task With_a_certificate_the_keys_are_stored_encrypted_in_postgresql()
+    {
+        await using var database = await PostgreSqlTestDatabase.CreateAsync();
+        var settings = database.AppSettings(TestCertificates.Settings(TestCertificates.A));
+
+        StorefrontApiFactory.TokenResponse tokens;
+        using (var first = new StorefrontApiFactory(settings: settings))
+        {
+            (_, tokens) = await first.SignInAsync("pg-encrypted@example.com");
+        }
+
+        Assert.True(await database.ScalarAsync("SELECT COUNT(*) FROM \"DataProtectionKeys\"") >= 1);
+        Assert.Equal(0, await database.ScalarAsync(
+            "SELECT COUNT(*) FROM \"DataProtectionKeys\" WHERE \"Xml\" NOT LIKE '%<encryptedSecret%' OR \"Xml\" LIKE '%unencrypted form%'"));
+
+        using var second = new StorefrontApiFactory(settings: settings);
+        var client = second.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/orders")).StatusCode);
+    }
+
+    [PostgreSqlFact]
     public async Task Orders_and_accounts_survive_an_app_restart()
     {
         await using var database = await PostgreSqlTestDatabase.CreateAsync();
