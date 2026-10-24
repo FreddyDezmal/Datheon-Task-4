@@ -12,7 +12,7 @@ All requests go through `services/apiClient.ts` (`apiRequest`). Components never
 
 | Concern | How it's handled |
 |---|---|
-| Base URL | `VITE_API_BASE_URL`. If unset, `npm run dev` uses `http://localhost:5080`, and a production build uses the site's own origin (`/api/...` behind a reverse proxy). A production bundle therefore never points at a developer's localhost. |
+| Base URL | `VITE_API_BASE_URL`. If unset, `npm run dev` uses `http://localhost:5080`, and a production build uses the site's own origin (`/api/...` behind a reverse proxy). A production bundle therefore never points at a developer's localhost. `vite build` refuses an empty, relative or non-local `http://` value, and on Render a missing one (`src/config/apiBaseUrl.ts`). Hosting on Render: `Deployment.md`, section 10. |
 | Timeouts and cancellation | 15 s timeout. A caller's `AbortSignal` is forwarded, so superseded catalogue searches and closed dialogs cancel their requests. |
 | Errors | Every failure becomes an `ApiError` with `status`, `code` (from the API's ProblemDetails), the `problem` body and `retryAfterSeconds`. Components decide what to do by `code`, not by parsing messages. |
 | Messages | API problem titles are written for shoppers and used as they are. 429 says how long to wait (from `Retry-After`), 413 says the request was too large, and a 5xx without a body gets a generic sentence. HTML error pages and stack traces are never shown. |

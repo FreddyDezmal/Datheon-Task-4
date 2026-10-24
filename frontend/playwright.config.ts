@@ -8,7 +8,8 @@ import { PORTS } from './e2e/support/ports';
  * Browser journeys against the real stack, started fresh for every run:
  *   - tools/fakestore_mock.py on :9101  (stand-in for FakeStoreAPI, so tests never need the internet)
  *   - the ASP.NET Core API on :5081      (Development, its own throwaway SQLite file under e2e/.data)
- *   - the Vite dev server on :5174       (pointed at that API)
+ *   - the Vite dev server on :5174       (pointed at that API); with E2E_PRODUCTION_BUILD=1, the
+ *     production bundle instead (`vite build`, then `vite preview`), as a static host serves it
  * Separate ports from `npm run dev` / `dotnet run` (5173 / 5080), so your own servers and database
  * are never touched. See Documentation/Testing.md.
  */
@@ -26,6 +27,13 @@ if (!process.env.TEST_WORKER_INDEX) {
 }
 
 const python = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+
+// The production bundle behaves like the Render Static Site: the API address is compiled in, and
+// `vite preview` serves index.html for unknown paths, as the site's /* -> /index.html rewrite does.
+const productionBuild = process.env.E2E_PRODUCTION_BUILD === '1';
+const frontendCommand = productionBuild
+  ? `npx vite build && npx vite preview --port ${PORTS.app} --strictPort`
+  : `npx vite --port ${PORTS.app} --strictPort`;
 
 export default defineConfig({
   testDir: './e2e',
@@ -78,11 +86,11 @@ export default defineConfig({
     },
     {
       name: 'Frontend',
-      command: `npx vite --port ${PORTS.app} --strictPort`,
+      command: frontendCommand,
       cwd: here,
       url: `http://localhost:${PORTS.app}`,
       reuseExistingServer: false,
-      timeout: 60_000,
+      timeout: productionBuild ? 180_000 : 60_000,
       env: { VITE_API_BASE_URL: `http://localhost:${PORTS.api}` },
     },
   ],

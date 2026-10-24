@@ -1,7 +1,7 @@
 # Deployment preparation: PostgreSQL and Docker
 
-This covers running the Storefront API on PostgreSQL in a container, as for a Render web service. **Nothing has been deployed.** No production database has been created or migrated, and no Render resources exist. Each item is marked:
-- *verified*: run as described, with the results under "Verification";
+This covers running the Storefront API on PostgreSQL in a container as a Render web service, and the frontend as a Render Static Site (section 10). The API is live at `https://datheon-task-4.onrender.com` (since 24 October 2026); the results are under "Verification". Each item is marked:
+- *verified*: run as described, with the results recorded;
 - *not run here*: something that still has to happen on a machine with registry access, or on Render.
 
 ---
@@ -27,7 +27,7 @@ Production settings, as environment variables:
 | `Database__Provider` | `PostgreSql` | Required |
 | `ConnectionStrings__Storefront` | `Host=…;Port=5432;Database=storefront;Username=storefront_app;Password=…;SSL Mode=Require` | Npgsql **key=value** format. A `postgres://user:pass@host/db` URL (the form Render shows) must be converted. Use the TLS mode your provider requires. Keep it in the platform's secret settings, never in a file. |
 | `AllowedHosts` | `storefront-api.onrender.com` | **Required.** The default (`localhost;127.0.0.1`) answers 400 to any other host name (*verified*). See blockers. |
-| `Cors__AllowedOrigins__0` | `https://your-frontend.example` | The frontend's exact origin |
+| `Cors__AllowedOrigins__0` | the Static Site's origin, e.g. `https://<site>.onrender.com` | The frontend's exact origin: scheme and host, no path, no trailing slash (section 10). It replaces the `http://localhost:5173` default. |
 | `PORT` | set by Render | The image falls back to 10000 |
 | `ASPNETCORE_ENVIRONMENT` | `Production` | Already the image default |
 | `Database__ApplyMigrationsOnStartup` | leave unset (`false`) | Migrations are applied separately (section 3) |
@@ -303,3 +303,104 @@ A Free Render PostgreSQL database expires 30 days after it's created and has no 
 4. **Check** `/health/ready` is 200 with `"database":"Healthy"`.
 
 Orders and accounts from the old database are lost, and everyone signs in again (the sign-in keys lived in that database too). The Data Protection certificate doesn't change: the new keys are encrypted with it from the start, so step 5 of section 8 isn't needed.
+
+## 10. Frontend: Render Static Site
+
+The frontend (React 19, TypeScript, Vite) is plain static files: `npm run build` writes them to `frontend/dist`. Render serves them from its CDN, and the browser calls the API directly. No server code is involved, and a static site doesn't sleep. The API still does, on the Free plan.
+
+### What was checked before deploying
+
+- **One way to the API.** Every request goes through `src/services/apiClient.ts`, which prefixes `VITE_API_BASE_URL`. Nothing else calls `fetch`, and no production address is hard-coded. `http://localhost:5080` is only the development default (`src/config/env.ts`).
+- **Read at build time.** Vite compiles `VITE_*` values into the JavaScript, so everyone can read them. The only one that matters, `VITE_API_BASE_URL`, isn't a secret. The production bundle contains the API address and no other configuration, no source maps, and no `localhost` (*verified*).
+- **The build checks the address.** `vite build` stops with a message if `VITE_API_BASE_URL` is empty, not an absolute address, uses `http://` for anything other than `localhost`, or includes credentials, a query string or a fragment. On Render (which sets `RENDER` during builds) it must also be set. A failed build leaves the previous deploy serving. Without the check, a missing address would make the site call itself: the rewrite below would answer `/api/…` with `index.html`, and every page would show "unexpected response". A local build can still leave it unset, in which case the bundle calls the API on its own origin. *Verified* for each case (`src/config/apiBaseUrl.ts`, 19 tests).
+- **No client-side routes.** The app is one page at `/`. The open product, category, search and sort live in the query string, which a reload keeps (*verified* by the browser tests). The rewrite below is still needed, so that any other path shows the shop instead of Render's 404.
+- **Sessions and cart.** Tokens are kept in `sessionStorage` (per tab) and the cart in `localStorage`, both on the site's own origin. Requests carry `Authorization: Bearer …`, not cookies, so the API's CORS policy doesn't allow credentials and no wildcard origin is involved.
+- **Failures.** A timed-out or dropped checkout is treated as an uncertain outcome. The idempotency key is kept and "Try again" reuses it, so the API replays the original order instead of creating a second one. Only definite failures (validation, price change, `DATABASE_BUSY`/`DATABASE_UNAVAILABLE`, catalogue outage) say the order wasn't placed. Browsing falls back to the API's last good catalogue copy, and an offline browser holds checkout.
+- **Cold starts.** The first request after the Free API has slept can take about a minute, longer than the frontend's 15-second request limit. The catalogue then shows "The store is taking too long to respond" with a retry, which works once the API is awake. A checkout sent during that window would be treated as uncertain, as above, so it can't be duplicated. Before a demo, open `https://datheon-task-4.onrender.com/health/live` a minute ahead.
+
+### Render settings
+
+**New → Static Site**, connected to the same GitHub repository:
+
+| Setting | Value |
+|---|---|
+| Branch | `main` |
+| Root Directory | `frontend` |
+| Build Command | `npm ci && npm run build` (the lockfile, and `tsc -b` before `vite build`) |
+| Publish Directory | `dist` |
+| Environment variable | `VITE_API_BASE_URL` = `https://datheon-task-4.onrender.com` (no trailing slash; not a secret) |
+| Node version | Render's default for new services (24.22.1 since 21 October 2026) meets every requirement in the lockfile. To pin one, set `NODE_VERSION`. |
+
+`npm ci` installs the dev dependencies (TypeScript, Vite), because Render sets `NODE_ENV=production` only at runtime, not during builds.
+
+**Redirects/Rewrites** (the site's settings, after it's created):
+
+| Source | Destination | Action |
+|---|---|---|
+| `/*` | `/index.html` | **Rewrite** |
+
+Render applies rules only to paths where no file exists, so scripts, styles and `favicon.svg` are unaffected. A Rewrite keeps the address in the browser, where a Redirect would change it. Source: [Render: Redirects and Rewrites](https://render.com/docs/redirects-rewrites).
+
+**Optional response headers** (Headers, path `/*`): `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`. A Content-Security-Policy is left out: it would have to allow Google Fonts, the product images' host and the API, and a mistake there breaks the site silently.
+
+`VITE_API_BASE_URL` is compiled in, so changing it needs a new build. Saving the variable on Render starts one.
+
+### Backend CORS
+
+On the **API** service, set:
+
+```
+Cors__AllowedOrigins__0 = https://<site>.onrender.com
+```
+
+Live value: `https://datheon-task-4-1.onrender.com` (Static Site `Datheon-Task-4-1`).
+
+That's the site's exact origin as Render shows it: `https://`, the host, no path and no trailing slash. It replaces the `http://localhost:5173` default (array index 0), so no local origin stays allowed in production. Add a custom domain later as `Cors__AllowedOrigins__1`. The policy allows `GET` and `POST` with the API's own headers, and no credentials. Saving redeploys the API.
+
+### Deploying, in a safe order
+
+1. **Commit and push** the frontend changes. The push also redeploys the API with no change, from cache.
+2. **Create the Static Site** with the settings above, and wait for "Your site is live". Without `VITE_API_BASE_URL`, the build stops with `VITE_API_BASE_URL is not set`. Fix it and redeploy.
+3. **Add the rewrite** (`/*` → `/index.html`, Rewrite).
+4. **Note the site's origin** shown at the top of its page, then set `Cors__AllowedOrigins__0` on the API to exactly that. Wait for the API's redeploy.
+5. **Check CORS** from PowerShell: the first must print the site's origin, the second nothing:
+   ```powershell
+   $site = "https://<site>.onrender.com"
+   foreach ($o in $site, "https://evil.example") {
+     $r = Invoke-WebRequest -Method Options -Uri https://datheon-task-4.onrender.com/api/checkout -Headers @{ Origin = $o; "Access-Control-Request-Method" = "POST"; "Access-Control-Request-Headers" = "content-type,idempotency-key" } -UseBasicParsing
+     "$o -> '$($r.Headers['Access-Control-Allow-Origin'])'"
+   }
+   ```
+6. **Go through the checklist below** in a normal browser window with DevTools open.
+
+To undo: suspend or delete the Static Site. The API isn't affected, apart from the CORS value, which can stay.
+
+### Checklist on the live site
+
+| Check | How |
+|---|---|
+| Loads over HTTPS | The address bar shows `https://<site>.onrender.com` with the lock icon; the catalogue appears. |
+| Reloads and other paths | Open a product, then reload: it reopens. Visit `/anything`: the shop loads (the rewrite), not a 404. |
+| Calls the deployed API | DevTools → Network: requests go to `datheon-task-4.onrender.com`, none to `localhost`. |
+| CORS | Step 5 above, and no CORS errors in the Console. |
+| Accounts | Register, sign in, reload (still signed in), open My orders, sign out. Closing the tab ends the session, by design. |
+| Browsing and cart | Search, filter by category, sort; add items, change quantities; reload: the cart is kept. |
+| One order per checkout | Place an order: one confirmation, and My orders lists it once. |
+| Uncertain checkout | DevTools → Network → throttling "Slow 4G". Place an order and switch to **Offline** while it's still pending, then back online and press **Try again**. The confirmation shows the same reference, and My orders lists one order. Covered automatically by "an interrupted checkout is recovered with Try again, without a duplicate order". |
+| API outage | DevTools → Network → block requests to `datheon-task-4.onrender.com`, then reload: the catalogue shows an error with a retry, and the cart is kept. Unblock and press retry: it recovers. |
+| Console and secrets | No errors in the Console. Sources: the bundle contains the API address and nothing secret. |
+
+### Verification (24 October 2026, Linux workspace, Node 22.22.0)
+
+| Check | Result |
+|---|---|
+| `npm run typecheck` | **Passed** |
+| Linting | No lint tool is configured in this repository. |
+| `npm run test:coverage` (unit and component) | **279 of 279 passed** (260 before, plus 19 for the address check). Coverage 94.39% statements, 90.3% branches, 94.27% functions, 96.37% lines; thresholds met. `apiBaseUrl.ts` 100%. |
+| `npm run build` as on Render (`RENDER=true`, the live API address) | **Passed**. `dist/index.html`, one JS file (291 KB, 88 KB gzip), one CSS file, `favicon.svg`. Contains `https://datheon-task-4.onrender.com`; no `localhost`, no other `VITE_` values, no source maps. |
+| Build with a missing (on Render), empty or `http://` public address | **Stopped** with the messages above |
+| Browser suite against the Vite dev server | **18 of 18 passed** |
+| Browser suite against the **production build** (`E2E_PRODUCTION_BUILD=1`: `vite build`, then `vite preview`, which also serves `index.html` for unknown paths) | **18 of 18 passed**. This covers journeys, checkout recovery, outages, offline, sessions, accessibility (axe) and layouts, and fails on unexpected console errors. |
+| Backend | Unchanged by this work |
+| **Live site** (`https://datheon-task-4-1.onrender.com`, Render Static Site, 24 October 2026) | Built from commit `999d073`, before the address check and the production-build test mode were committed. Node 24.22.1 (Render default), `npm ci` 0 vulnerabilities, `tsc -b` passed. Output `index-DQvjdsAS.js`, the same content hash as the workspace build with `VITE_API_BASE_URL=https://datheon-task-4.onrender.com`, so the deployed bundle is the one tested above. Rewrite `/*` → `/index.html` added. API `Cors__AllowedOrigins__0=https://datheon-task-4-1.onrender.com`: preflight from the site answered `Access-Control-Allow-Origin: https://datheon-task-4-1.onrender.com`, and from `https://evil.example` no header. No Console errors or failed requests. **The owner reported every item of the checklist above working.** |
+

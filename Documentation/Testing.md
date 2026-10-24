@@ -65,6 +65,7 @@ The browser suite uses its own ports (5174, 5081, 9101), so it can run while `np
 - `PYTHON`: the Python command (default `python` on Windows, `python3` elsewhere).
 - `PW_CHROMIUM_PATH`: use a Chromium that's already installed.
 - `E2E_API_COMMAND`: how to start the API (for example, add `--no-restore` when packages come from an offline feed).
+- `E2E_PRODUCTION_BUILD=1`: test the production bundle (`vite build`, then `vite preview`) instead of the dev server, as a static host serves it.
 
 ### Coverage reports
 
