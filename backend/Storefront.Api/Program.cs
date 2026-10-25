@@ -10,6 +10,10 @@ using Storefront.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// No request body may exceed 64 KiB, the largest any endpoint needs (checkout); Kestrel's default is
+// 30 MB. Endpoints set lower limits of their own (Security-Audit.md, SA-10).
+builder.WebHost.ConfigureKestrel(kestrel => kestrel.Limits.MaxRequestBodySize = Storefront.Api.Controllers.CheckoutController.MaxRequestBodyBytes);
+
 // ---- Configuration (validated at startup so misconfiguration fails fast) ----
 builder.Services.AddOptions<FakeStoreOptions>()
     .Bind(builder.Configuration.GetSection(FakeStoreOptions.SectionName))
@@ -88,6 +92,7 @@ builder.Services.AddProblemDetails(options =>
                 { Status: StatusCodes.Status403Forbidden } => "FORBIDDEN",
                 { Status: StatusCodes.Status404NotFound } => "NOT_FOUND",
                 { Status: StatusCodes.Status405MethodNotAllowed } => "METHOD_NOT_ALLOWED",
+                { Status: StatusCodes.Status413PayloadTooLarge } => "REQUEST_TOO_LARGE",
                 { Status: StatusCodes.Status415UnsupportedMediaType } => "UNSUPPORTED_MEDIA_TYPE",
                 { Status: StatusCodes.Status429TooManyRequests } => "TOO_MANY_REQUESTS",
                 _ => "ERROR",
@@ -123,8 +128,10 @@ app.LogDataProtectionKeyEncryption(dataProtectionCertificates);
 await app.ApplyMigrationsIfConfiguredAsync();
 
 app.Lifetime.ApplicationStarted.Register(() => app.Logger.LogInformation(
-    "Storefront API started in {Environment}; catalogue source {CatalogueHost}.",
+    "Storefront API started in {Environment} on {Runtime}; catalogue source {CatalogueHost}.",
     app.Environment.EnvironmentName,
+    // The exact runtime patch level, e.g. ".NET 10.0.13": the base image decides it (Security-Audit.md, SA-11).
+    System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
     new Uri(app.Services.GetRequiredService<IOptions<FakeStoreOptions>>().Value.BaseUrl).Host));
 app.Lifetime.ApplicationStopping.Register(() => app.Logger.LogInformation(
     "Storefront API stopping: readiness now reports unavailable; finishing in-flight requests."));
@@ -153,15 +160,13 @@ else
 }
 
 app.UseCors(CorsSettings.PolicyName);
+app.UseAccountRequestLimits();
 app.UseAuthentication();
 app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapControllers();
-app.MapGroup("/api/account")
-    .WithTags("Account")
-    .MapIdentityApi<StorefrontUser>()
-    .RequireRateLimiting(RateLimitPolicies.Account);
+app.MapStorefrontAccount();
 app.MapStorefrontHealthChecks();
 
 app.Run();

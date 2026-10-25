@@ -95,7 +95,7 @@ public sealed class DatabaseProviderTests
         // No retrying execution strategy: it can't be combined with checkout's explicit transaction,
         // and would re-run database work on its own.
         Assert.False(db.Database.CreateExecutionStrategy().RetriesOnFailure);
-        Assert.Equal("PostgreSQL db.internal:5432/storefront", DatabaseSetup.DescribeDatabase(db));
+        Assert.Equal("PostgreSQL db.internal:5432/storefront (connection pool up to 20)", DatabaseSetup.DescribeDatabase(db));
     }
 
     [Fact]

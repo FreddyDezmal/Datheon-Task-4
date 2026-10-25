@@ -42,17 +42,23 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 | `GET /api/products`, `/api/products/{id}`, `/api/categories`, `/api/store/config`, `/health`, `/health/live`, `/health/ready` | Public | Catalogue browsing needs no account. |
 | `POST /api/checkout` | Public (guest checkout). With a bearer token, the order is linked to that account. | The existing frontend checks out without signing in, and that contract is kept. |
 | `GET /api/orders`, `GET /api/orders/{reference}` | **Signed-in customer** (`Customer` policy) | Order history is personal data. |
-| `/api/account/*` | Public, rate-limited | Registration and sign-in. |
+| `/api/account/register`, `/login`, `/refresh`, `/logout` | Public, rate-limited, bodies up to 16 KiB | Registration, sign-in, token refresh, sign-out. |
+| `GET /api/account/manage/info` | **Signed-in customer** | The account's email. |
 | `/swagger` | Development only | API documentation is not exposed in production. |
 
 ### How it works
 
-- **ASP.NET Core Identity** with its built-in API endpoints (`MapIdentityApi`). Passwords are hashed with PBKDF2 (Identity's `PasswordHasher`), never stored or logged in plain text.
+- **ASP.NET Core Identity**, with the account endpoints mapped explicitly (`Security/AccountEndpoints.cs`) rather than `MapIdentityApi`, which also exposed account management, email flows and 2FA that the app can't support (Security-Audit.md, SA-01). Passwords are hashed with PBKDF2 (Identity's `PasswordHasher`), never stored or logged in plain text.
   - **Password rules:** at least 8 characters, with upper case, lower case, a digit and a symbol.
-  - **Lockout:** 5 failed sign-ins lock the account for 5 minutes.
+  - **Sign-in protection** (`Security/SignInThrottle.cs`), instead of Identity's lockout: 5 failures for one account from one client (IPv4 address or IPv6 /64), or 20 from all clients, return 429 for that account for 15 minutes, before the password is checked. An attacker on one network can't lock the owner out on another. Unknown emails are counted and hashed the same way, so neither the answers nor their timing reveal which emails have accounts.
   - **Emails:** must be unique.
-- **Bearer tokens**, issued by `/api/account/login` and sent as `Authorization: Bearer …`. They are Identity's own tokens, signed with the Data Protection key ring; there is no custom token code. Access tokens last 1 hour; `/api/account/refresh` swaps a refresh token for a new one.
-- **Why bearer tokens rather than cookies:** the frontend runs on a different origin (`:5173`). The browser never attaches header tokens automatically, so cross-site request forgery isn't possible. The cookie scheme Identity also registers is configured to answer 401/403 instead of redirecting to a login page.
+- **Bearer tokens**, issued by `/api/account/login` and sent as `Authorization: Bearer …`. They are Identity's own tokens, signed with the Data Protection key ring; there is no custom token code. Access tokens last 1 hour.
+- **Server-side sessions** (`Security/Sessions.cs`, table `UserSessions`). Each sign-in is a session, and both tokens carry its ID. Every authenticated request checks that the session is still active, so ending it stops the access token at once, not after its hour:
+  - `/api/account/logout` ends it;
+  - each refresh token can be exchanged once; presenting a used one again (after a 30-second grace for a lost response) ends the session;
+  - a password change ends every session of the account (its security stamp no longer matches);
+  - sessions last at most 14 days, however often they're refreshed, and an account keeps at most 10 active ones.
+- **Why bearer tokens rather than cookies:** the frontend runs on a different origin (`:5173`). The browser never attaches header tokens automatically, so cross-site request forgery isn't possible. No cookie scheme is registered at all, so there is no cookie sign-in mode (SA-08).
 - **Authorization is enforced on the server.** `OrdersController` carries `[Authorize(Policy = "Customer")]`. That policy requires an authenticated user via the bearer scheme.
 - **Ownership:** every order query filters by the caller's user ID. Another customer's order returns **404**, not 403, so a valid reference can't be confirmed by probing.
 - **Checkout with a bad token fails loudly:** checkout is open to guests, but a request that sends an `Authorization` header the server can't authenticate (expired, forged) gets **401** before anything is saved. Without this, an expired session would quietly place a guest order that never shows up in the shopper's account.
@@ -63,8 +69,8 @@ Dependency direction: Controllers → Services → (Data, Models). Nothing in `S
 
 | Control | Setting |
 |---|---|
-| Rate limiting | Per client IP, fixed 60-second window: 10 requests for `/api/account/*`, 30 for checkout. Over the limit returns 429 ProblemDetails with `Retry-After`. Configurable under `RateLimiting`. |
-| Request size | Checkout bodies over 64 KiB → 413; more than 50 lines → a single 400 error. |
+| Rate limiting | Per client (IPv4 address, or IPv6 /64 network), fixed 60-second window: 10 requests for `/api/account/*`, 30 for checkout. Over the limit returns 429 ProblemDetails with `Retry-After`. Configurable under `RateLimiting`. |
+| Request size | Checkout bodies over 64 KiB and account bodies over 16 KiB → 413 `REQUEST_TOO_LARGE`; Kestrel's global ceiling is 64 KiB. More than 50 checkout lines → a single 400 error. FakeStoreAPI responses over 2 MiB are refused (`FakeStore:MaxResponseKilobytes`). |
 | Security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy: same-site`, and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (not on Swagger UI). |
 | HTTPS | Outside Development: `UseHsts()` (1 year) and `UseHttpsRedirection()`. Development stays on `http://localhost:5080` for the Vite dev server. |
 | CORS | Only the configured origins; methods GET and POST; headers `Content-Type`, `Accept`, `Authorization`, `Idempotency-Key`, `X-Correlation-Id`. Exposes `Idempotent-Replayed`, `Retry-After`, `X-Correlation-Id` and `Catalogue-Stale`. |
@@ -91,7 +97,8 @@ SQLite is a single file with no server to install, so a fresh checkout runs with
 |---|---|
 | `Orders` | `Reference` (unique), `CreatedAtUtc`, `UserId` (nullable FK to `AspNetUsers`, set to null if the account is deleted), customer name and email, `Currency`, `Subtotal`, `Tax`, `Shipping`, `Total`, `IdempotencyKey` (unique when present), `RequestFingerprint` |
 | `OrderLines` | `OrderId` (FK, cascade delete), `ProductId`, `Title`, `UnitPrice`, `Quantity`, `LineTotal`; unique on (`OrderId`, `ProductId`) |
-| `AspNetUsers` etc. | Identity's tables: users, password hashes, lockout state, tokens |
+| `AspNetUsers` etc. | Identity's tables: users, password hashes, security stamps |
+| `UserSessions` | One row per sign-in: `UserId` (FK, cascade delete), creation and absolute expiry, the current and previous refresh-token IDs, the security stamp at sign-in, and when and why it was revoked. Rows that ended more than a day ago are deleted at the account's next sign-in. |
 
 - **Historical snapshot.** Each line stores the title and unit price as they were at checkout, and the order stores its totals. Later catalogue changes don't alter past orders (tested).
 - **Catalogue not stored.** FakeStoreAPI remains the source of truth for products and prices; a local copy would be a second price list that could go stale. `ProductId` is therefore not a foreign key.

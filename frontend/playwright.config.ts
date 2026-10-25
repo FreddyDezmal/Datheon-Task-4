@@ -91,7 +91,8 @@ export default defineConfig({
       url: `http://localhost:${PORTS.app}`,
       reuseExistingServer: false,
       timeout: productionBuild ? 180_000 : 60_000,
-      env: { VITE_API_BASE_URL: `http://localhost:${PORTS.api}` },
+      // In production mode `vite preview` also sends the site's security headers, with the mock as the image host.
+      env: { VITE_API_BASE_URL: `http://localhost:${PORTS.api}`, CSP_IMAGE_ORIGINS: `http://localhost:${PORTS.mock}` },
     },
   ],
 });

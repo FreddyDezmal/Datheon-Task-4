@@ -97,7 +97,9 @@ Product browsing doesn't use the database, so it keeps working while the databas
 | `GET /api/products`, `/api/products/{id}`, `/api/categories`, `/api/store/config` | Upstream GETs are retried by the API (above). The browser does **not** retry by itself, except **once** when it comes back online after a failed or stale load. | Yes: read-only |
 | `GET /api/orders`, `/api/orders/{reference}` | No | Yes: read-only |
 | `POST /api/checkout` | **Never**, on the server or in the browser | After 503 `DATABASE_BUSY` / `DATABASE_UNAVAILABLE` nothing was saved, so any retry is safe. After any other failure, only by resending the **same request with the same `Idempotency-Key`**. If the first attempt was saved, the API returns that order (`Idempotent-Replayed: true`) instead of creating a second one. The frontend does exactly this when the shopper selects **Try again**. |
-| `POST /api/account/login`, `/refresh` | No | Yes: nothing is stored |
+| `POST /api/account/login` | No | Yes: a repeat starts another session (an account keeps at most 10) |
+| `POST /api/account/refresh` | No | **Within 30 seconds**: a repeat with the same refresh token after a lost response is honoured. Later, the token counts as reused and the session ends; sign in again. |
+| `POST /api/account/logout` | No | Yes: ending an ended session is a no-op (always 204) |
 | `POST /api/account/register` | No | **Not idempotent, but recoverable.** After an error the account may exist, even on a 503. Try signing in first. A repeat either creates the account or is refused as a duplicate email; it never creates a second account. |
 | Any 503 with `Retry-After` | No | Yes, after waiting the given seconds |
 

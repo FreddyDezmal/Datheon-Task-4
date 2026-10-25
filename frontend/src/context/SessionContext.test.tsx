@@ -5,6 +5,7 @@ import { ApiError } from '../services/apiClient';
 import {
   accountRoutes,
   authHeader,
+  bodyOf,
   callsTo,
   issueTokens,
   jsonResponse,
@@ -161,5 +162,53 @@ describe('SessionContext', () => {
     await act(() => result.current.signIn({ email: 'ada@example.com', password: 'x' }));
 
     expect(authHeader(callsTo(fetchMock, '/api/account/manage/info')[0]?.[1])).toMatch(/^Bearer access-\d+$/);
+  });
+
+  describe('signing out ends the session on the server too (SA-02)', () => {
+    it('sends the current refresh token to /api/account/logout', async () => {
+      const fetchMock = mockApi({ routes: accountRoutes() });
+      const { result } = renderSession();
+      await act(() => result.current.signIn({ email: 'ada@example.com', password: 'Str0ng!Passw0rd' }));
+      // The refresh token the session holds right now, after any rotation.
+      const held = JSON.parse(window.sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '{}').refreshToken as string;
+
+      act(() => result.current.signOut());
+
+      await waitFor(() => expect(callsTo(fetchMock, '/api/account/logout')).toHaveLength(1));
+      const [, init] = callsTo(fetchMock, '/api/account/logout')[0]!;
+      expect(init?.method).toBe('POST');
+      expect(bodyOf(init)).toEqual({ refreshToken: held });
+      expect(result.current.status).toBe('anonymous');
+    });
+
+    it('signs the tab out at once even when the server cannot be reached', async () => {
+      mockApi({ routes: { ...accountRoutes(), '/api/account/logout': () => Promise.reject(new TypeError('Failed to fetch')) } });
+      const { result } = renderSession();
+      await act(() => result.current.signIn({ email: 'ada@example.com', password: 'Str0ng!Passw0rd' }));
+
+      act(() => result.current.signOut());
+
+      expect(result.current.status).toBe('anonymous');
+      expect(window.sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+    });
+
+    it('sends nothing when nobody is signed in', async () => {
+      const fetchMock = mockApi({ routes: accountRoutes() });
+      const { result } = renderSession();
+
+      act(() => result.current.signOut());
+
+      expect(callsTo(fetchMock, '/api/account/logout')).toHaveLength(0);
+    });
+
+    it('stores the new refresh token after every refresh, since each one works only once', async () => {
+      seedSession('ada@example.com', 'refresh-old');
+      mockApi({ routes: { ...accountRoutes(), '/api/account/refresh': () => jsonResponse({ tokenType: 'Bearer', accessToken: 'a-new', expiresIn: 3600, refreshToken: 'refresh-new' }) } });
+      const { result } = renderSession();
+
+      await waitFor(() => expect(result.current.status).toBe('signed-in'));
+
+      expect(JSON.parse(window.sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '{}').refreshToken).toBe('refresh-new');
+    });
   });
 });

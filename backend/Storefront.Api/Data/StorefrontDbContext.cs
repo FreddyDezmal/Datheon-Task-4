@@ -31,6 +31,9 @@ public class StorefrontDbContext : IdentityDbContext<StorefrontUser>, IDataProte
 
     public DbSet<OrderLine> OrderLines => Set<OrderLine>();
 
+    /// <summary>Signed-in sessions, so tokens can be revoked (sign-out, refresh-token reuse, password change).</summary>
+    public DbSet<UserSession> UserSessions => Set<UserSession>();
+
     /// <summary>
     /// The keys that sign Identity's bearer and refresh tokens. Kept here rather than on the server's
     /// disk, so a new container (every deploy) and every instance use the same keys, and sign-ins
@@ -46,6 +49,7 @@ public class StorefrontDbContext : IdentityDbContext<StorefrontUser>, IDataProte
         var isSqlite = Database.IsSqlite();
         builder.ApplyConfiguration(new OrderConfiguration(isSqlite));
         builder.ApplyConfiguration(new OrderLineConfiguration(isSqlite));
+        builder.ApplyConfiguration(new UserSessionConfiguration());
     }
 }
 

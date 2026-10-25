@@ -1,5 +1,8 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using Storefront.Api.Configuration;
 using Storefront.Api.Exceptions;
 using Storefront.Api.Models;
 
@@ -15,9 +18,12 @@ public interface IFakeStoreClient
 }
 
 /// <summary>Typed HttpClient for FakeStoreAPI, registered through IHttpClientFactory.</summary>
-public sealed class FakeStoreClient(HttpClient httpClient, ILogger<FakeStoreClient> logger) : IFakeStoreClient
+public sealed class FakeStoreClient(
+    HttpClient httpClient, ILogger<FakeStoreClient> logger, IOptions<FakeStoreOptions>? options = null) : IFakeStoreClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    private readonly long _maxResponseBytes = (options?.Value.MaxResponseKilobytes ?? new FakeStoreOptions().MaxResponseKilobytes) * 1024L;
 
     public async Task<IReadOnlyList<FakeStoreProduct>> GetProductsAsync(CancellationToken cancellationToken)
     {
@@ -59,6 +65,34 @@ public sealed class FakeStoreClient(HttpClient httpClient, ILogger<FakeStoreClie
         return product;
     }
 
+    /// <summary>Reads the body, refusing it once it passes FakeStore:MaxResponseKilobytes (declared or actual).</summary>
+    private async Task<string> ReadBoundedAsync(HttpContent content, string relativeUrl, CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength > _maxResponseBytes)
+        {
+            throw TooLarge(relativeUrl);
+        }
+
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[16 * 1024];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
+        {
+            if (buffer.Length + read > _maxResponseBytes)
+            {
+                throw TooLarge(relativeUrl);
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
+
+    private UpstreamServiceException TooLarge(string relativeUrl) =>
+        new(UpstreamFailureKind.MalformedResponse, $"FakeStoreAPI's response for '{relativeUrl}' is larger than {_maxResponseBytes / 1024} KiB.");
+
     internal static bool IsValid(FakeStoreProduct? product) =>
         product is not null
         && product.Id > 0
@@ -85,7 +119,7 @@ public sealed class FakeStoreClient(HttpClient httpClient, ILogger<FakeStoreClie
                     $"FakeStoreAPI responded with {(int)response.StatusCode} for '{relativeUrl}'.");
             }
 
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            var body = await ReadBoundedAsync(response.Content, relativeUrl, cancellationToken);
             if (string.IsNullOrWhiteSpace(body) || body.Trim() == "null")
             {
                 return null;

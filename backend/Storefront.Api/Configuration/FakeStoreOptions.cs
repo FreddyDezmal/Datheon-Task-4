@@ -40,6 +40,14 @@ public sealed class FakeStoreOptions : IValidatableObject
     [Range(0, 1440)]
     public int StaleCatalogueMaxMinutes { get; set; } = 60;
 
+    /// <summary>
+    /// The largest FakeStoreAPI response read, in KiB (the whole real catalogue is about 10 KiB). A
+    /// larger one is refused as malformed instead of being buffered, so a compromised or hijacked
+    /// upstream can't exhaust the API's memory (Security-Audit.md, SA-14).
+    /// </summary>
+    [Range(16, 65_536)]
+    public int MaxResponseKilobytes { get; set; } = 2048;
+
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (AttemptTimeoutSeconds > TimeoutSeconds)

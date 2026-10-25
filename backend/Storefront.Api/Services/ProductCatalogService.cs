@@ -45,6 +45,10 @@ public sealed class ProductCatalogService(
     private readonly TimeSpan _cacheDuration = TimeSpan.FromSeconds(options.Value.CatalogueCacheSeconds);
     private readonly TimeSpan _staleLimit = TimeSpan.FromMinutes(options.Value.StaleCatalogueMaxMinutes);
 
+    // Image URLs come from FakeStoreAPI unchecked; plain http is accepted only when the catalogue itself
+    // is configured over http (the local mock), never in production (Security-Audit.md, SA-14).
+    private readonly bool _allowHttpImages = Uri.TryCreate(options.Value.BaseUrl, UriKind.Absolute, out var baseUrl) && baseUrl.Scheme == Uri.UriSchemeHttp;
+
     public bool ServedStale { get; private set; }
 
     /// <summary>Records an upstream failure for the readiness report; always true so it can sit in an exception filter.</summary>
@@ -111,7 +115,7 @@ public sealed class ProductCatalogService(
         try
         {
             var product = await fakeStoreClient.GetProductAsync(id, cancellationToken);
-            return product is null ? null : ToDto(Normalize(product));
+            return product is null ? null : ToDto(Normalize(product, _allowHttpImages));
         }
         catch (Exceptions.UpstreamServiceException ex) when (Record(ex) && state.LastGoodWithin(_staleLimit) is { } lastGood)
         {
@@ -176,7 +180,7 @@ public sealed class ProductCatalogService(
             }
 
             IReadOnlyDictionary<int, CatalogueProduct> catalogue = products
-                .Select(Normalize)
+                .Select(p => Normalize(p, _allowHttpImages))
                 .GroupBy(p => p.Id)
                 .ToDictionary(g => g.Key, g => g.First());
 
@@ -194,7 +198,7 @@ public sealed class ProductCatalogService(
         }
     }
 
-    internal static CatalogueProduct Normalize(FakeStoreProduct source)
+    internal static CatalogueProduct Normalize(FakeStoreProduct source, bool allowHttpImages = false)
     {
         var rating = source.Rating is null ? null : new ProductRating(source.Rating.Rate, source.Rating.Count);
         var price = PricingCalculator.RoundMoney(source.Price);
@@ -205,10 +209,22 @@ public sealed class ProductCatalogService(
             source.Description?.Trim() ?? string.Empty,
             price,
             CategoryNormalizer.Normalize(source.Category),
-            source.Image ?? string.Empty,
+            SafeImageUrl(source.Image, allowHttpImages),
             rating,
             ProductBadgeRules.Evaluate(price, rating));
     }
+
+    /// <summary>
+    /// The image URL if it's an absolute https URL (or http, when allowed) without credentials; otherwise
+    /// empty, and the storefront shows its placeholder. Nothing like javascript:, data: or a relative path
+    /// reaches the page.
+    /// </summary>
+    internal static string SafeImageUrl(string? image, bool allowHttp) =>
+        Uri.TryCreate(image?.Trim(), UriKind.Absolute, out var url)
+        && (url.Scheme == Uri.UriSchemeHttps || (allowHttp && url.Scheme == Uri.UriSchemeHttp))
+        && string.IsNullOrEmpty(url.UserInfo)
+            ? url.AbsoluteUri
+            : string.Empty;
 
     internal static ProductDto ToDto(CatalogueProduct p) => new(
         p.Id,

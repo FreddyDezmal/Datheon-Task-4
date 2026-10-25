@@ -168,9 +168,10 @@ export async function apiRequest<T>(
  */
 function describeFailure(status: number, problem: ProblemDetails | null, retryAfterSeconds: number | null): string {
   if (status === 429) {
-    return retryAfterSeconds
-      ? `Too many requests. Wait ${retryAfterSeconds} ${retryAfterSeconds === 1 ? 'second' : 'seconds'} and try again.`
-      : 'Too many requests. Wait a moment and try again.';
+    if (!retryAfterSeconds) return 'Too many requests. Wait a moment and try again.';
+    // Sign-in protection can ask for a quarter of an hour: say so in minutes.
+    if (retryAfterSeconds >= 120) return `Too many requests. Wait ${Math.ceil(retryAfterSeconds / 60)} minutes and try again.`;
+    return `Too many requests. Wait ${retryAfterSeconds} ${retryAfterSeconds === 1 ? 'second' : 'seconds'} and try again.`;
   }
   if (status === 413) return 'That request was too large for the store to accept.';
   const text = [problem?.title, problem?.detail].filter(Boolean).join(' ');

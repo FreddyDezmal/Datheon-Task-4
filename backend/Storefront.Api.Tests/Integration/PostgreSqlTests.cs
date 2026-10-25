@@ -316,10 +316,14 @@ public sealed class PostgreSqlTests
     // ---------- Accounts and persistence ----------
 
     [PostgreSqlFact]
-    public async Task Accounts_lockout_and_order_history_work_on_postgresql()
+    public async Task Accounts_sign_in_protection_sessions_and_order_history_work_on_postgresql()
     {
         await using var database = await PostgreSqlTestDatabase.CreateAsync();
-        using var factory = new StorefrontApiFactory(settings: database.AppSettings());
+        using var factory = new StorefrontApiFactory(settings: database.AppSettings(new()
+        {
+            ["ForwardedHeaders:Enabled"] = "true",
+            ["ForwardedHeaders:ClientAddressHeader"] = "CF-Connecting-IP",
+        }));
         var (client, _) = await factory.SignInAsync("pg-ada@example.com");
 
         var placed = await client.SendAsync(Checkout("pg-account-0001", AuthorizationTests.Order((2, 1))));
@@ -327,16 +331,30 @@ public sealed class PostgreSqlTests
         Assert.Equal(HttpStatusCode.OK, placed.StatusCode);
         Assert.Equal(1, orders.GetArrayLength());
 
-        // Lockout writes LockoutEnd, a timestamp with time zone (Npgsql requires UTC offsets).
-        var anonymous = factory.CreateClient();
+        // Sessions are written with timestamps with time zone (Npgsql requires UTC values).
+        Assert.Equal(1, await database.ScalarAsync(
+            "SELECT COUNT(*) FROM \"UserSessions\" WHERE \"RevokedAtUtc\" IS NULL AND \"CreatedAtUtc\" <= now() AND \"ExpiresAtUtc\" > now()"));
+
+        // Repeated failures from one network are throttled (429 with Retry-After), without locking the account.
+        var statuses = new List<HttpStatusCode>();
         HttpResponseMessage? last = null;
         for (var i = 0; i < 6; i++)
         {
-            last = await anonymous.PostAsJsonAsync("/api/account/login", new { email = "pg-ada@example.com", password = "Wr0ng!Password" });
+            last = await LoginFrom("198.51.100.20", factory, "pg-ada@example.com", "Wr0ng!Password");
+            statuses.Add(last.StatusCode);
         }
 
-        Assert.Equal(HttpStatusCode.Unauthorized, last!.StatusCode);
-        Assert.Equal(1, await database.ScalarAsync("SELECT COUNT(*) FROM \"AspNetUsers\" WHERE \"LockoutEnd\" > now()"));
+        Assert.Equal([.. Enumerable.Repeat(HttpStatusCode.Unauthorized, 5), HttpStatusCode.TooManyRequests], statuses);
+        Assert.True(last!.Headers.RetryAfter?.Delta > TimeSpan.Zero);
+        Assert.Equal(0, await database.ScalarAsync("SELECT COUNT(*) FROM \"AspNetUsers\" WHERE \"LockoutEnd\" IS NOT NULL"));
+        Assert.Equal(HttpStatusCode.OK, (await LoginFrom("203.0.113.9", factory, "pg-ada@example.com", "Str0ng!Passw0rd")).StatusCode);
+    }
+
+    private static Task<HttpResponseMessage> LoginFrom(string address, StorefrontApiFactory factory, string email, string password)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/account/login") { Content = JsonContent.Create(new { email, password }) };
+        request.Headers.Add("CF-Connecting-IP", address);
+        return factory.CreateClient().SendAsync(request);
     }
 
     [PostgreSqlFact]
@@ -348,6 +366,45 @@ public sealed class PostgreSqlTests
             () => new StorefrontApiFactory(settings: database.AppSettings()),
             () => database.ScalarAsync("SELECT COUNT(*) FROM \"DataProtectionKeys\""),
             () => database.ScalarAsync("WITH d AS (DELETE FROM \"DataProtectionKeys\" RETURNING 1) SELECT COUNT(*) FROM d"));
+    }
+
+    [PostgreSqlFact]
+    public async Task A_burst_of_requests_never_uses_more_connections_than_the_pool_cap()
+    {
+        await using var database = await PostgreSqlTestDatabase.CreateAsync();
+        // The test databases are unpooled (so they can be dropped); production pools connections, so this
+        // test turns pooling on, and tags the app's connections so only those are counted.
+        var pooled = new Npgsql.NpgsqlConnectionStringBuilder(database.ConnectionString) { Pooling = true, ApplicationName = "pool-cap-test" }.ConnectionString;
+        using var factory = new StorefrontApiFactory(settings: database.AppSettings(new()
+        {
+            ["Database:MaxPoolSize"] = "4",
+            ["ConnectionStrings:Storefront"] = pooled,
+        }));
+        var (client, _) = await factory.SignInAsync("pg-pool@example.com");
+
+        var peak = 0;
+        using var stop = new CancellationTokenSource();
+        var sampler = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                var n = await database.ScalarAsync(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'pool-cap-test'");
+                peak = Math.Max(peak, (int)n);
+                await Task.Delay(10);
+            }
+        });
+
+        var requests = Enumerable.Range(0, 60).Select(i => i % 2 == 0 ? client.GetAsync("/api/orders") : client.GetAsync("/health/ready")).ToList();
+        var responses = await Task.WhenAll(requests);
+        await stop.CancelAsync();
+        await sampler;
+
+        factory.Dispose();
+        Npgsql.NpgsqlConnection.ClearAllPools(); // release the pooled connections so the database can be dropped
+
+        Assert.All(responses, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
+        Assert.InRange(peak, 1, 4);
     }
 
     [PostgreSqlFact]

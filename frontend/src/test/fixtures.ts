@@ -110,6 +110,7 @@ export const accountRoutes = (email = 'ada@example.com'): Record<string, Handler
   '/api/account/refresh': () => jsonResponse(issueTokens()),
   '/api/account/login': () => jsonResponse(issueTokens()),
   '/api/account/register': () => new Response(null, { status: 200 }),
+  '/api/account/logout': () => new Response(null, { status: 204 }),
   '/api/account/manage/info': (_url, init) =>
     authHeader(init) ? jsonResponse({ email, isEmailConfirmed: false }) : unauthorized(),
 });

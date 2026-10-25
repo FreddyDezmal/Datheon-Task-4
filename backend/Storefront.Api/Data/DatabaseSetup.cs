@@ -38,7 +38,7 @@ public static class DatabaseSetup
                 break;
 
             case DatabaseProvider.PostgreSql:
-                var postgres = ValidatePostgreSqlConnectionString(connectionString);
+                var postgres = ValidatePostgreSqlConnectionString(connectionString, ReadMaxPoolSize(configuration));
                 // No EnableRetryOnFailure: a retrying execution strategy would re-run work on its own and
                 // cannot be combined with checkout's explicit transaction. Retries stay with the client,
                 // which reuses its Idempotency-Key.
@@ -75,7 +75,26 @@ public static class DatabaseSetup
         return provider;
     }
 
-    internal static string ValidatePostgreSqlConnectionString(string connectionString)
+    /// <summary>
+    /// Database:MaxPoolSize (1–100, default 20): the connection pool's ceiling when the connection string
+    /// doesn't set one. Npgsql's own default is 100, which is as many connections as a small managed
+    /// PostgreSQL plan allows in total, leaving nothing for a second instance during a deploy or for an
+    /// administrator (Security-Audit.md, SA-04).
+    /// </summary>
+    internal static int ReadMaxPoolSize(IConfiguration configuration)
+    {
+        var value = configuration.GetValue("Database:MaxPoolSize", DefaultMaxPoolSize);
+        return value is >= 1 and <= 100
+            ? value
+            : throw new InvalidOperationException("Database:MaxPoolSize must be between 1 and 100.");
+    }
+
+    internal const int DefaultMaxPoolSize = 20;
+
+    // The spellings Npgsql accepts (it rejects "Max Pool Size").
+    private static readonly string[] MaxPoolSizeKeys = ["maximum pool size", "maxpoolsize"];
+
+    internal static string ValidatePostgreSqlConnectionString(string connectionString, int defaultMaxPoolSize = DefaultMaxPoolSize)
     {
         NpgsqlConnectionStringBuilder builder;
         try
@@ -93,6 +112,21 @@ public static class DatabaseSetup
         {
             throw new InvalidOperationException(
                 $"ConnectionStrings:{DatabaseOptions.ConnectionStringName} must name a Host and a Database for PostgreSQL.");
+        }
+
+        // An explicit Maximum Pool Size in the connection string wins; otherwise apply the app's ceiling.
+        var keys = new System.Data.Common.DbConnectionStringBuilder { ConnectionString = connectionString }.Keys
+            .Cast<string>()
+            .Select(k => k.Trim().ToLowerInvariant());
+        if (!keys.Any(MaxPoolSizeKeys.Contains))
+        {
+            builder.MaxPoolSize = defaultMaxPoolSize;
+        }
+
+        if (builder.MinPoolSize > builder.MaxPoolSize)
+        {
+            throw new InvalidOperationException(
+                $"ConnectionStrings:{DatabaseOptions.ConnectionStringName} sets Minimum Pool Size above Maximum Pool Size.");
         }
 
         return builder.ConnectionString;
@@ -132,7 +166,7 @@ public static class DatabaseSetup
         if (db.Database.IsNpgsql())
         {
             var builder = new NpgsqlConnectionStringBuilder(connectionString);
-            return $"PostgreSQL {builder.Host}:{builder.Port}/{builder.Database}";
+            return $"PostgreSQL {builder.Host}:{builder.Port}/{builder.Database} (connection pool up to {builder.MaxPoolSize})";
         }
 
         return $"SQLite {new SqliteConnectionStringBuilder(connectionString).DataSource}";

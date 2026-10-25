@@ -12,9 +12,9 @@ public static class SecuritySetup
     public const string DataProtectionApplicationName = "Storefront.Api";
 
     /// <summary>
-    /// Accounts use ASP.NET Core Identity with its built-in API endpoints (MapIdentityApi):
-    /// PBKDF2 password hashing, lockout after repeated failures, and Identity's own bearer tokens
-    /// (opaque, signed by the Data Protection key ring). No custom token code.
+    /// Accounts use ASP.NET Core Identity: PBKDF2 password hashing, its user store, and its own bearer
+    /// tokens (opaque, signed by the Data Protection key ring). The account endpoints themselves are
+    /// mapped explicitly in <see cref="AccountEndpoints"/>, with only what the storefront uses.
     /// Bearer tokens rather than cookies: the frontend runs on another origin, and header tokens are
     /// never sent automatically by the browser, so there is no CSRF exposure.
     /// </summary>
@@ -39,33 +39,42 @@ public static class SecuritySetup
             }
         }
 
-        services.AddIdentityApiEndpoints<StorefrontUser>(options =>
+        // Bearer tokens are the only way to authenticate (Identity's opaque tokens, protected by the
+        // Data Protection keys above). No cookie scheme is registered, so a sign-in cookie can't exist
+        // and no request is ever authenticated by something the browser sends on its own (SA-08).
+        // Every bearer token is checked against its server-side session before the request counts as
+        // authenticated, so a session ended by sign-out, refresh-token reuse or a password change stops
+        // working at once (SessionValidation, SA-02).
+        services.AddAuthentication(IdentityConstants.BearerScheme)
+            .AddBearerToken(IdentityConstants.BearerScheme, options =>
+                options.Events.OnMessageReceived = SessionValidation.OnMessageReceivedAsync);
+
+        services.AddOptions<SessionOptions>()
+            .BindConfiguration(SessionOptions.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddScoped<SessionService>();
+
+        services.AddOptions<SignInProtectionOptions>()
+            .BindConfiguration(SignInProtectionOptions.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddSingleton<SignInThrottle>();
+
+        // Identity's user store, password hashing and sign-in checks, without its UI or API-endpoint
+        // bundles. The endpoints the storefront uses are mapped in AccountEndpoints.
+        services.AddIdentityCore<StorefrontUser>(options =>
             {
                 options.User.RequireUniqueEmail = true;
                 options.Password.RequiredLength = 8;
-                options.Lockout.AllowedForNewUsers = true;
-                options.Lockout.MaxFailedAccessAttempts = 5;
-                options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(5);
+                // Identity's lockout locked the account for everyone after 5 failures, so anyone who knew
+                // an email could keep its owner out (SA-06). SignInThrottle limits guessing per account and client instead.
+                options.Lockout.AllowedForNewUsers = false;
                 // No email sender is configured, so accounts can't be confirmed by email (see README).
                 options.SignIn.RequireConfirmedAccount = false;
             })
+            .AddSignInManager()
             .AddEntityFrameworkStores<StorefrontDbContext>();
-
-        // Identity also registers a cookie scheme. Make sure an API caller is never redirected to a
-        // login page: unauthenticated -> 401, forbidden -> 403.
-        services.ConfigureApplicationCookie(options =>
-        {
-            options.Events.OnRedirectToLogin = context =>
-            {
-                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                return Task.CompletedTask;
-            };
-            options.Events.OnRedirectToAccessDenied = context =>
-            {
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                return Task.CompletedTask;
-            };
-        });
 
         services.AddAuthorizationBuilder()
             .AddPolicy(AuthorizationPolicies.Customer, policy => policy
@@ -133,13 +142,13 @@ public static class SecuritySetup
         return services;
     }
 
-    // Partitioned by client IP. Behind a reverse proxy, enable forwarded headers first so this is the
-    // real client address rather than the proxy's (see README, "Production checklist").
+    // Partitioned by client: an IPv4 address, or an IPv6 /64 network (ClientPartition). Behind a reverse
+    // proxy, enable forwarded headers first so this is the real client rather than the proxy (Deployment.md).
     private static RateLimitPartition<string> FixedWindowPerClient(
         HttpContext context, string policy, Func<RateLimitingOptions, int> permitLimit)
     {
         var options = context.RequestServices.GetRequiredService<IOptions<RateLimitingOptions>>().Value;
-        var client = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var client = ClientPartition.For(context);
         return RateLimitPartition.GetFixedWindowLimiter($"{policy}:{client}", _ => new FixedWindowRateLimiterOptions
         {
             PermitLimit = permitLimit(options),

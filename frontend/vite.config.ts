@@ -2,21 +2,33 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import { apiBaseUrlProblem } from './src/config/apiBaseUrl.ts';
+import { originOf, securityHeaders } from './src/config/securityHeaders.ts';
 
 export default defineConfig(({ command, mode }) => {
   // `vite build` stops on an unusable VITE_API_BASE_URL (src/config/apiBaseUrl.ts). On Render (which
   // sets RENDER during builds) it must also be present; a local build may leave it unset (same origin).
+  const env = loadEnv(mode, process.cwd(), 'VITE_');
   if (command === 'build') {
-    const env = loadEnv(mode, process.cwd(), 'VITE_');
     const problem = apiBaseUrlProblem(env.VITE_API_BASE_URL, { required: Boolean(process.env.RENDER) });
     if (problem) throw new Error(problem);
   }
+
+  // `vite preview` serves the production bundle with the same headers the Render Static Site sets, so
+  // the browser tests check the bundle under that Content-Security-Policy. CSP_IMAGE_ORIGINS (not a
+  // VITE_ variable, so it never reaches the bundle) lists the image hosts; FakeStoreAPI by default.
+  const previewHeaders = securityHeaders({
+    api: originOf(env.VITE_API_BASE_URL) ?? "'self'",
+    images: (process.env.CSP_IMAGE_ORIGINS ?? 'https://fakestoreapi.com').split(/\s+/).filter(Boolean),
+  });
 
   return {
     plugins: [react()],
     server: {
       port: 5173,
       strictPort: true, // the backend's CORS policy allows exactly this origin
+    },
+    preview: {
+      headers: previewHeaders,
     },
     test: {
       environment: 'jsdom',

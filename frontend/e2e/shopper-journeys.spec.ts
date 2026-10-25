@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { API_URL } from './support/ports';
 import {
   PRODUCTS,
   accountButton,
@@ -116,9 +117,15 @@ test('register, check out signed in, find the order in the account, then sign ou
   // The same order, read back through the API with a fresh sign-in.
   expect((await ordersFromApi(request, email)).map((o) => o.orderReference)).toEqual([reference]);
 
+  // Signing out ends the session on the server too: a copy of the refresh token stops working.
+  const held = await page.evaluate(() => JSON.parse(sessionStorage.getItem('greenhaus.session') ?? '{}').refreshToken as string);
+  expect(held).toBeTruthy();
   await account.getByRole('button', { name: 'Sign out' }).click();
   await expect(accountButton(page)).toHaveAccessibleName('Sign in');
   expect(await page.evaluate(() => sessionStorage.getItem('greenhaus.session'))).toBeNull();
+  await expect
+    .poll(async () => (await request.post(`${API_URL}/api/account/refresh`, { data: { refreshToken: held } })).status())
+    .toBe(401);
   await page.reload();
   await expect(accountButton(page)).toHaveAccessibleName('Sign in');
 });

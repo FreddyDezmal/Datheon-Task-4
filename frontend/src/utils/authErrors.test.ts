@@ -33,6 +33,15 @@ describe('describeAuthError', () => {
     expect(describeAuthError(validation({ Something: [] }), 'register')).toEqual({ form: 'Check your details and try again.' });
   });
 
+  it('passes on how long to wait when sign-in attempts are throttled (429)', () => {
+    const throttled = new ApiError('Too many requests. Wait 15 minutes and try again.', 429, 'TOO_MANY_REQUESTS', {
+      status: 429,
+      title: 'Too many failed sign-in attempts.',
+    }, 900);
+
+    expect(describeAuthError(throttled, 'sign-in')).toEqual({ form: 'Too many requests. Wait 15 minutes and try again.' });
+  });
+
   it('distinguishes a wrong password from a locked account', () => {
     const failed = new ApiError('Unauthorized', 401, 'UNAUTHORIZED', { status: 401, detail: 'Failed' });
     const locked = new ApiError('Unauthorized', 401, 'UNAUTHORIZED', { status: 401, detail: 'LockedOut' });

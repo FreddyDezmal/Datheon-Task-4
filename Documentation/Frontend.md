@@ -30,8 +30,9 @@ These were checked against the running API, not just the source:
 | Endpoint | Shape used by the frontend |
 |---|---|
 | `POST /api/account/register` | 200 with an empty body. 400 `VALIDATION_FAILED` with Identity error keys such as `DuplicateEmail`, `InvalidEmail`, `PasswordTooShort` and `PasswordRequiresUpper`, which are mapped to the email or password field |
-| `POST /api/account/login` | `{ tokenType, accessToken, expiresIn, refreshToken }`. 401 with `detail` `"Failed"` or `"LockedOut"` |
-| `POST /api/account/refresh` | Same token shape; 401 when the refresh token is rejected |
+| `POST /api/account/login` | `{ tokenType, accessToken, expiresIn, refreshToken }`. 401 with `detail` `"Failed"`; 429 with `Retry-After` after repeated failures (shown as "Wait 15 minutes…") |
+| `POST /api/account/refresh` | Same token shape, with a **new** refresh token: each one works once, so the app always keeps the latest. 401 when it's rejected |
+| `POST /api/account/logout` | `{ refreshToken }` → 204. Sent on sign-out so the session ends on the server |
 | `GET /api/account/manage/info` | `{ email, isEmailConfirmed }` |
 | `GET /api/orders`, `GET /api/orders/{reference}` | `OrderSummaryDto[]` and `OrderDto`. 401 without a token; 404 for someone else's order |
 | `POST /api/checkout` | Bearer token optional. Sends `Idempotency-Key`; reads `Idempotent-Replayed`. CORS allows `Authorization` and `Idempotency-Key` and exposes `Idempotent-Replayed` and `Retry-After` |
@@ -58,7 +59,8 @@ Other details:
 - A refresh that finishes after a sign-out is ignored (a generation counter).
 - If the API is unreachable while a session is being restored, the shopper stays signed in, and the next request retries the refresh.
 - A Strict Mode double effect sends one refresh, not two.
-- Sign-out clears the browser's tokens. Identity bearer tokens can't be revoked on the server, so a copied access token would stay valid until it expires. That's a property of the backend's token type.
+- Sign-out clears the browser's tokens and calls `/api/account/logout`, which ends the session on the server: a copied access or refresh token stops working too. The tab signs out at once even if that call fails.
+- Because each refresh token works once, a duplicated browser tab (which copies `sessionStorage`) shares the session with the original. When one of them refreshes, the other's token is used up, and that session ends for both, with the usual "session expired" notice.
 
 **Trade-off.** `sessionStorage` is readable by any script on the page, so an XSS bug could take the refresh token. The app renders no untrusted HTML and React escapes text by default. The alternative is Identity's cookie mode (httpOnly cookies the page can't read). That would need anti-forgery tokens on every POST and a same-site deployment, a bigger change than this task called for.
 

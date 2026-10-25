@@ -9,6 +9,7 @@ public sealed class SecurityHeadersMiddleware(RequestDelegate next)
     public Task InvokeAsync(HttpContext context)
     {
         var isSwagger = context.Request.Path.StartsWithSegments("/swagger");
+        var isPrivate = IsPrivate(context.Request.Path);
         context.Response.OnStarting(() =>
         {
             var headers = context.Response.Headers;
@@ -21,9 +22,20 @@ public sealed class SecurityHeadersMiddleware(RequestDelegate next)
                 headers.ContentSecurityPolicy = "default-src 'none'; frame-ancestors 'none'";
             }
 
+            // Tokens, order history and order confirmations (names, emails): never stored by a browser
+            // or an intermediary cache (Security-Audit.md, SA-09).
+            if (isPrivate)
+            {
+                headers.CacheControl = "no-store";
+            }
+
             return Task.CompletedTask;
         });
 
         return next(context);
     }
+
+    /// <summary>Responses that can carry tokens or personal data.</summary>
+    internal static bool IsPrivate(PathString path) =>
+        path.StartsWithSegments("/api/account") || path.StartsWithSegments("/api/orders") || path.StartsWithSegments("/api/checkout");
 }

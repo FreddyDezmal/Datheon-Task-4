@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { TOKEN_REFRESH_MARGIN_MS } from '../config/env';
-import { fetchAccountInfo, login, refreshTokens, register as registerAccount } from '../services/accountService';
+import { fetchAccountInfo, login, logout, refreshTokens, register as registerAccount } from '../services/accountService';
 import { ApiError } from '../services/apiClient';
 import type { AuthTokens, Credentials } from '../types/account';
 import { clearSession, loadSession, saveSession } from '../utils/sessionStorage';
@@ -168,7 +168,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [signIn],
   );
 
-  const signOut = useCallback(() => endSession('signed-out'), [endSession]);
+  // Ends the session on the server too (SA-02), so a copy of the tokens stops working. The tab signs
+  // out at once either way; the server call is best-effort.
+  const signOut = useCallback(() => {
+    const refreshToken = tokens.current?.refreshToken;
+    endSession('signed-out');
+    if (refreshToken) void logout(refreshToken);
+  }, [endSession]);
 
   const value = useMemo<SessionValue>(
     () => ({ status: state.status, email: state.email, signIn, register, signOut, withAccessToken }),

@@ -25,6 +25,17 @@ describe('apiRequest', () => {
     expect(error.isRetryable).toBe(false);
   });
 
+  it.each([
+    ['900', 'Too many requests. Wait 15 minutes and try again.'],
+    ['121', 'Too many requests. Wait 3 minutes and try again.'],
+    ['119', 'Too many requests. Wait 119 seconds and try again.'],
+  ])('says long 429 waits in minutes (Retry-After %s)', async (seconds, message) => {
+    respond(JSON.stringify({ status: 429, title: 'Too many failed sign-in attempts.', code: 'TOO_MANY_REQUESTS' }), 429, { 'Retry-After': seconds });
+    const error = await apiRequest('/api/account/login', (d) => d).catch((e: unknown) => e as ApiError);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).message).toBe(message);
+  });
+
   it('reads Retry-After on 429 and says how long to wait', async () => {
     respond(JSON.stringify({ status: 429, title: 'Too Many Requests', code: 'TOO_MANY_REQUESTS' }), 429, { 'Retry-After': '30' });
     const error = await failureOf(apiRequest('/x', () => null));

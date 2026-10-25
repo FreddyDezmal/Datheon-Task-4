@@ -23,7 +23,7 @@ A demo storefront with a React + TypeScript frontend and an ASP.NET Core Web API
 │ StoreConfigContext ─────────┼─GET───▶│       └ PricingCalculator        │  ├──▶ App_Data/storefront.db
 │ AccountDialog / MyOrders ───┼─GET───▶│ OrdersController [Authorize]     │  │     Orders, OrderLines,
 │ SessionContext (bearer) ────┼─POST──▶│   └ OrderQueryService ───────────┼──┤     Identity users
-└─────────────────────────────┘        │ /api/account/* (Identity API)    ┼──┘
+└─────────────────────────────┘        │ /api/account/* (Identity)        ┼──┘
                                        │ GlobalExceptionHandler → ProblemDetails │
                                        └──────────────────────────────────┘
 ```
@@ -40,7 +40,7 @@ A demo storefront with a React + TypeScript frontend and an ASP.NET Core Web API
 |---|---|---|
 | Cart ownership | **Client-managed cart in localStorage; server validates at checkout** (option 1 in the brief) | Refresh-survival is free, guests need no account, and the security boundary stays where it matters: the server never trusts client prices. `GET /api/cart` is therefore not implemented. |
 | Database | **SQLite file + EF Core 10, with migrations** | Runs on any machine with no server to install. Orders snapshot titles and prices, so history survives catalogue changes. The catalogue itself stays upstream (FakeStoreAPI). |
-| Accounts | **ASP.NET Core Identity API endpoints, bearer tokens** | Built-in password hashing, lockout and tokens; no custom JWT code. Guest checkout stays open. The frontend signs in with the same endpoints and refreshes the token when it expires. |
+| Accounts | **ASP.NET Core Identity, bearer tokens, server-side sessions** | Identity's password hashing and tokens; no custom JWT code. Only register, login, refresh, logout and account info are exposed (no account management, email flows or 2FA). Each sign-in is a session the server can end: signing out, a reused refresh token or a password change stops both tokens at once. Failed sign-ins are throttled per account and network instead of locking the account. Guest checkout stays open. |
 | Expired session at checkout | **401, never a silent guest order** | A checkout sent with an invalid or expired token is rejected, so the frontend renews the token and resends the same order (same key), or tells the shopper and lets them choose guest checkout. |
 | Retries | **`Idempotency-Key` header on checkout** | Repeating a request returns the original order instead of a second one; the frontend reuses the key on **Try again**. |
 | Where filtering happens | Backend (`GET /api/products?search=&category=&sort=`) | One implementation of the rules, tested once in xUnit. The frontend debounces search (250 ms) and aborts superseded requests. |
@@ -300,7 +300,8 @@ Options are validated at startup (`ValidateOnStart`), so an invalid URL, a tax r
 
 - **Database:** `Database:Provider` (`Sqlite` or `PostgreSql`) and `ConnectionStrings:Storefront` have **no defaults** in `appsettings.json`. `appsettings.Development.json` sets `Sqlite` with `Data Source=App_Data/storefront.db`, resolved against the `Storefront.Api` folder. Any other environment must set both (e.g. `Database__Provider=PostgreSql`), or the app refuses to start. `ApplyMigrationsOnStartup` is `true` in Development only. Production setup, the PostgreSQL migration procedure and the container image are in `Documentation/Deployment.md`.
 - **Behind a reverse proxy**, enable `ForwardedHeaders` so rate limits see each client's address and HTTPS is recognised. It's off by default because a forwarded header can be forged unless the app is reachable only through the proxy; see `Documentation/Deployment.md`, section 7.
-- **Rate limits** are per client IP and per window: `AccountPermitLimit` covers all `/api/account/*` endpoints, `CheckoutPermitLimit` covers `POST /api/checkout`. Over the limit returns 429 with `Retry-After`.
+- **Rate limits** are per client (an IPv4 address, or an IPv6 /64 network) and per window: `AccountPermitLimit` covers all `/api/account/*` endpoints, `CheckoutPermitLimit` covers `POST /api/checkout`. Over the limit returns 429 with `Retry-After`.
+- **Sign-in protection** (`SignInProtection`): 5 failed sign-ins for one account from one client, or 20 from all clients, return 429 for that account for 15 minutes. It replaces Identity's lockout, which let anyone lock an account they knew the email of.
 - **AllowedHosts** rejects requests for other host names (400). Set your real host name in production, for example `AllowedHosts=shop.example.com`, and include the host name a health probe uses.
 - **FakeStore retries and fallback, shutdown and logging:** see `Documentation/Availability.md`. Logs are JSON outside Development and readable text in Development.
 
@@ -331,7 +332,7 @@ All errors use `application/problem+json` with `status`, `title`, `code`, `trace
 | `POST /api/checkout` | Places and saves an order (no payment). Public; a bearer token links the order to that account, and an invalid or expired token is rejected with 401 rather than becoming a guest order. Body: `customer`, `items[]` (`productId`, `quantity`), `expectedTotal` (required). Optional `Idempotency-Key` header | 200 (`Idempotent-Replayed: true` on a repeat) | 400 `VALIDATION_FAILED`, 401 `UNAUTHORIZED`, 409 `PRICE_CHANGED`, 413 `REQUEST_TOO_LARGE` (body over 64 KiB), 415, 422 `PRODUCTS_UNAVAILABLE` / `IDEMPOTENCY_KEY_REUSED`, 429 `TOO_MANY_REQUESTS`, 502, 504 |
 | `GET /api/orders` | **Signed in.** Your orders, newest first (up to 100) | 200 | 401 `UNAUTHORIZED` |
 | `GET /api/orders/{reference}` | **Signed in.** One of your orders, as stored at checkout | 200 | 401, 404 `NOT_FOUND` (also for someone else's order) |
-| `POST /api/account/register`, `/login`, `/refresh` | ASP.NET Core Identity endpoints (also `/manage/info`, `/forgotPassword`, `/resetPassword`, 2FA) | 200 | 400 `VALIDATION_FAILED`, 401, 429 `TOO_MANY_REQUESTS` |
+| `POST /api/account/register`, `/login`, `/refresh`, `/logout`; `GET /api/account/manage/info` | Account endpoints over ASP.NET Core Identity. Refresh tokens work once each; logout ends the session on the server. Nothing else from Identity (account management, email flows, 2FA) is exposed. | 200 (logout 204) | 400 `VALIDATION_FAILED`, 401, 413 `REQUEST_TOO_LARGE`, 429 `TOO_MANY_REQUESTS` |
 
 Every response also carries `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and a `Content-Security-Policy` that allows nothing (JSON only). The full list of error codes is in [`Documentation/Backend.md`](Documentation/Backend.md#error-handling).
 
@@ -447,7 +448,7 @@ Any extra fields the client sends (such as `unitPrice`) are ignored; the server 
 | Signed-in token expired during checkout | Renewed once and the same order resent. If the session can't be renewed: "Your session expired, so this order hasn't been placed", with **Sign in again** or **Place order as a guest**. |
 | 422 idempotency key reused | "An earlier attempt at this order may already have been placed. Check before placing it again." A new key is used for the next attempt. |
 | Saved session rejected on load, or orders return 401 | The session is renewed once; if that fails the shopper is signed out with a notice. Nothing redirects, so there's no loop. |
-| Wrong password, locked account, duplicate email, password rules | Shown on the field it belongs to (or above the button), with the typed values kept. |
+| Wrong password, too many attempts (429, with how long to wait), duplicate email, password rules | Shown on the field it belongs to (or above the button), with the typed values kept. |
 | Product link to a missing product | "This product is no longer in the catalogue." |
 | 409 price change | Cart prices update from the server quote, the new total is shown, and the button becomes **Confirm new total and place order**. |
 | 422 unavailable products | The affected items are named, with **Remove unavailable items**. |
@@ -477,9 +478,9 @@ Responsive: layouts were checked at 320, 375, 768, 1024 and 1440 px wide with no
 - A shopper quoted a **Reference**: search the API log for it (`Documentation/Availability.md`, section 5).
 - To start over, stop the API and delete `backend/Storefront.Api/App_Data/storefront.db`.
 
-**Signed out unexpectedly, or "Your session has expired".** Sessions last for the browser tab; closing the tab signs you out. Restarting the API keeps sessions: the Data Protection keys are stored in the database. Deleting the database (or its `DataProtectionKeys` rows) ends every session.
+**Signed out unexpectedly, or "Your session has expired".** Sessions last for the browser tab; closing the tab signs you out. Restarting the API keeps sessions: the sessions and the Data Protection keys are stored in the database. A session also ends when you sign out, after 14 days, when the password changes, or when an already-used refresh token is presented again (for example from a duplicated browser tab). Deleting the database (or its `DataProtectionKeys` or `UserSessions` rows) ends every session.
 
-**401 on `/api/orders`.** Send the `accessToken` from `/api/account/login` as `Authorization: Bearer <token>`. Tokens expire after an hour; use `/api/account/refresh` or sign in again. If the `DataProtectionKeys` rows are deleted, existing tokens stop working.
+**401 on `/api/orders`.** Send the `accessToken` from `/api/account/login` as `Authorization: Bearer <token>`. Tokens expire after an hour; use `/api/account/refresh` (with the latest refresh token: each works once) or sign in again. Tokens of a session that has ended, or issued before server-side sessions existed, are refused.
 
 **429 Too Many Requests.** The per-client limits are 10 account requests and 30 checkouts per minute. Raise them with `RateLimiting__AccountPermitLimit` and `RateLimiting__CheckoutPermitLimit` for load or smoke testing.
 
