@@ -115,7 +115,15 @@
   display: block;
 }
 
+/* The two-line clamp is on the link itself, not on the heading around it: clamping only the heading
+   hid the extra lines but left the link's box covering them, so a long title's link reached down
+   over the card's Add button (found by the axe target-size rule in CI). */
 .product-card__link {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
   color: inherit;
   text-decoration: none;
 }
@@ -179,11 +187,6 @@
 }
 
 .product-card__title {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow: hidden;
   min-height: 2.6em;
   font-family: var(--font-body);
   font-size: var(--text-sm);

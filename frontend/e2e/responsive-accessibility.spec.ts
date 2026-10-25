@@ -39,6 +39,42 @@ async function layoutProblems(page: Page) {
         problems.push(`${el.tagName.toLowerCase()} "${(el.getAttribute('aria-label') ?? el.textContent ?? '').trim().slice(0, 40)}" is outside the viewport`);
       }
     }
+    // No two controls in the same layer overlap, anywhere on the page (not only in the visible part).
+    // An overlap shrinks a touch target below WCAG 2.5.8's 24px, and the top element can take the
+    // other's taps. A link's box includes lines hidden by a line clamp, which is exactly the case
+    // this catches. Layers (the page, the sticky header, a dialog) are meant to stack, and how they
+    // cover each other depends on scrolling, so only controls in the same layer are compared.
+    const name = (el: Element) => `${el.tagName.toLowerCase()} "${(el.getAttribute('aria-label') ?? el.textContent ?? '').trim().slice(0, 40)}"`;
+    const layerOf = (el: Element) => {
+      for (let node: Element | null = el; node; node = node.parentElement) {
+        if (['fixed', 'sticky'].includes(getComputedStyle(node).position)) return node;
+      }
+      return null;
+    };
+    const controls = [...document.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')].filter((el) => {
+      if (el.closest('[inert]') || getComputedStyle(el).visibility === 'hidden') return false;
+      const box = el.getBoundingClientRect();
+      return box.width > 0 && box.height > 0;
+    });
+    for (let i = 0; i < controls.length; i++) {
+      for (let j = i + 1; j < controls.length; j++) {
+        const [a, b] = [controls[i], controls[j]];
+        if (a.contains(b) || b.contains(a) || layerOf(a) !== layerOf(b)) continue;
+        const [r, s] = [a.getBoundingClientRect(), b.getBoundingClientRect()];
+        // A button placed inside a field (Show password) is fine when it sits within the padding
+        // the field reserves for it, so the text never runs underneath.
+        const field = [a, b].find((el) => el instanceof HTMLInputElement);
+        const other = field === a ? b : a;
+        if (field && other.tagName === 'BUTTON') {
+          const f = field.getBoundingClientRect();
+          const reserved = parseFloat(getComputedStyle(field).paddingRight);
+          if (other.getBoundingClientRect().left >= f.right - reserved - 1) continue;
+        }
+        const overlapX = Math.min(r.right, s.right) - Math.max(r.left, s.left);
+        const overlapY = Math.min(r.bottom, s.bottom) - Math.max(r.top, s.top);
+        if (overlapX > 1 && overlapY > 1) problems.push(`${name(a)} overlaps ${name(b)} by ${Math.round(overlapY)}px`);
+      }
+    }
     return problems;
   });
 }

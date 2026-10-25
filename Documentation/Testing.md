@@ -142,6 +142,14 @@ Three steps need services this workspace can't reach, so their first real run is
 
 Check the first run of both workflows in the **Actions** tab.
 
+**First run on GitHub (25 October 2026): one real defect found.** Five jobs passed, including the three steps run there for the first time, the image build and its contents check. The production-mode browser job failed on the axe `target-size` rule. Product 14's "Add to cart" button was "partially obscured … 48px by 20.4px" by the same card's title link.
+
+- **Cause:** the two-line clamp was on the heading, so the link inside still had all 9 lines of its 96-character title. They were hidden, but its box reached down over the button. Six products were affected at narrow widths, by up to 39px.
+- **Why it slipped through until then:** axe checks only what's on screen. Locally the card was never in view at that moment of the test; on GitHub's runner (Chromium 156) it was.
+- **Fix:** the clamp is now on the link itself (`catalog.css`). The catalogue is pixel-identical before and after at 320, 768 and 1440px.
+- **New regression check:** the layout checks now fail when any two controls in the same layer overlap, anywhere on the page, so the test no longer depends on scroll position. A button inside a field is allowed only within the padding the field reserves for it.
+- **Verified:** with the old CSS, the check reports all six cards, and axe flags product 14 once it's in view. With the fix, the full browser suite passes in both modes on Chromium 141 and 153, and axe passes with each of the 20 cards in view.
+
 ---
 
 ## 3a. Availability safeguards (23 October 2026, live availability pass)
