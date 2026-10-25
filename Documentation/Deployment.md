@@ -95,14 +95,7 @@ Migrations are never applied automatically in production. Run them deliberately,
    ```bash
    psql "host=… port=5432 dbname=storefront user=storefront_owner sslmode=require" -v ON_ERROR_STOP=1 -f postgresql-migrations.sql
    ```
-5. **Grant** the app role data access only. Do this once, and **again after every migration that adds a table**. Without it the app gets "permission denied" on the new table (*verified* with `DataProtectionKeys`):
-   ```sql
-   GRANT CONNECT ON DATABASE storefront TO storefront_app;
-   GRANT USAGE ON SCHEMA public TO storefront_app;
-   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO storefront_app;
-   GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO storefront_app;
-   ```
-   *Verified*: the API runs fully with only these grants, and the app role can't create tables.
+5. **Grants:** none needed after a migration, once the app role exists. `tools/db/create-app-role.sql` (section 13) sets *default privileges*, so every table the owner creates is granted to `storefront_app` automatically. *Verified* in the rehearsal: a table created afterwards by the owner was usable by the app straight away. Before that script existed, the grants had to be repeated after each migration that added a table.
 6. **Verify**: list the migrations against the database (every one should be applied, none pending):
    ```bash
    dotnet ef migrations list --project Storefront.Api --context PostgreSqlStorefrontDbContext --connection "<owner connection string>"
@@ -473,3 +466,99 @@ GitHub Actions builds and tests every push (`.github/workflows/ci.yml`; what eac
 **When CI fails on `main`:** nothing is deployed. Fix the problem and push again. The test report or Playwright report is attached to the failed run under **Artifacts**. For a failed **Security scan**:
 - update the named package;
 - or, for a base-image finding, run "Clear build cache & deploy" on Render. CI's image build always pulls fresh base images, so a rebuild picks up their patches.
+
+## 13. A least-privilege database role for the API (SA-13)
+
+Until now, the API connected as the database's default user, which owns every table and can create roles and databases. That means a bug or an injection could alter or drop the schema. From this section on, the API connects as **`storefront_app`**, which can only read and write rows. Migrations keep running as the default user, the owner (sections 3 and 11).
+
+`tools/db/create-app-role.sql` creates the role. Run it as the owner. It's safe to run again.
+
+What the role gets:
+- `SELECT`, `INSERT`, `UPDATE` and `DELETE` on every table, including tables future migrations create (default privileges);
+- read-only access to `__EFMigrationsHistory`;
+- a limit of 25 connections (the app's pool is 20);
+- `statement_timeout` of 30 seconds and `idle_in_transaction_session_timeout` of 60 seconds.
+
+It can't create, alter, drop or truncate tables, create functions, roles, schemas or databases, or switch to the owner's role. The script sets no password; you set one interactively, so the password never appears in a file, a log or shell history.
+
+**Rehearsed** (25 October 2026) on PostgreSQL 16. The database was owned by a non-superuser role with only `CREATEROLE`, like Render's default user, and the three migrations had been applied as that owner.
+- **The script:** runs cleanly twice. It covers 11 tables with data access and none with more. The rehearsal caught a mistake in the first draft: a non-superuser can't run `ALTER ROLE … NOSUPERUSER`. The script now checks the role's attributes instead of setting them.
+- **What the role is refused:** each of the following was refused as `storefront_app`:
+  - `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE` and `TRUNCATE`;
+  - `CREATE SCHEMA`, `CREATE FUNCTION`, `CREATE ROLE` and `CREATE DATABASE`;
+  - deleting from the migration history;
+  - `SET ROLE` to the owner;
+  - `COPY … TO PROGRAM`.
+- **Limits and future tables:** a 31-second query was cancelled; a transaction left open was ended after 60 seconds; the 26th and 27th simultaneous connections were refused; a table the owner created afterwards was writable at once.
+- **The API, connected as `storefront_app`:** Production mode, readiness 200. The smoke test passed 68 of 68 (Swagger is Development-only), including the outage modes. The checkout stress tests A–E gave the same results as in the audit. There were 0 permission errors.
+- Production runs **PostgreSQL 18.6**. The rules involved (roles created by a non-superuser, default privileges, per-role settings) are the same there, and step 2 below prints the result, so any difference shows at once.
+
+**Steps.** Use one PowerShell window, from the `storefront` folder, with `$db` set to the External Database URL as in section 11.
+
+1. **Check first** (read-only). This was done on 25 October 2026: `storefront_9f4i_user` has `CREATEROLE` and owns all 12 tables.
+2. **Create the role:**
+   ```powershell
+   Get-Content tools\db\create-app-role.sql -Raw | docker run --rm -i postgres:16 psql $db
+   ```
+   The last four results should be:
+   - `storefront_app | f | f | f | f | 25`;
+   - the two timeouts;
+   - `11 | 0 | 11` (tables with data access, tables with more than that, tables);
+   - `t | f` (migration history readable, not writable).
+
+   If it prints `already exists with extra attributes`, stop. Nothing was changed.
+3. **Set its password** without it touching a file or the screen. First check that the server doesn't log statements and stores passwords hashed. Expect `none` and `scram-sha-256`. If `log_statement` shows anything else, stop:
+   ```powershell
+   'SHOW log_statement; SHOW password_encryption;' | docker run --rm -i postgres:16 psql $db
+   $b = New-Object byte[] 24; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+   $pw = -join ($b | ForEach-Object { $_.ToString('x2') })
+   "ALTER ROLE storefront_app PASSWORD '$pw';" | docker run --rm -i postgres:16 psql -q $db
+   ```
+   The statement goes to docker on standard input, over TLS. It doesn't appear on screen, in PowerShell's history (which records only `$pw`) or in the process list. With `log_statement = none`, a statement that succeeds isn't logged.
+
+   *Why not `\password`:* it would send only a hash, which is better in principle. But in some Windows consoles, Ctrl+V inside `docker run -it` sends a literal Ctrl+V character instead of pasting. Both hidden prompts then "match" and the wrong password is set. That happened on 25 October 2026: the sign-in test then failed with `password authentication failed`.
+4. **Test signing in as the role** before touching Render:
+   ```powershell
+   $app = $db -replace '^postgres(ql)?://[^@]+@', "postgresql://storefront_app:$pw@"
+   'SELECT current_user, count(*) AS orders FROM "Orders";' | docker run --rm -i postgres:16 psql $app
+   'CREATE TABLE must_fail (id int);' | docker run --rm -i postgres:16 psql $app
+   ```
+   The first should print `storefront_app` and a count. The second should fail with `permission denied for schema public`.
+5. **Switch the API.** On Render, open the API service → **Environment** → `ConnectionStrings__Storefront` → edit.
+   - Change only the username to `storefront_app` (the `Username=` or `User ID=` part).
+   - Change the password to the new one. Copy it with `Set-Clipboard $pw` and paste it with Ctrl+V; the browser pastes normally.
+   - Keep the host (the internal one), the database and every other setting.
+
+   Save; that redeploys.
+6. **Verify:**
+   - The deploy log shows `Using PostgreSQL … (connection pool up to 20)`, and the service goes live.
+   - On the site: sign in, add to cart, place an order, view it under your account.
+   - The service's logs contain no `permission denied`.
+   - Then confirm what the API connects as, and whether it uses TLS. Run this **as `storefront_app`**: the owner can't see the details of another role's sessions, so the same query run as the owner silently leaves them out. Wake the API first:
+     ```powershell
+     curl.exe -s -o NUL -w "API ready: %{http_code}`n" https://datheon-task-4.onrender.com/health/ready
+     'SELECT a.application_name, s.ssl, s.version, (a.client_addr << ''10.0.0.0/8''::inet) AS private_network, count(*) FROM pg_stat_activity a JOIN pg_stat_ssl s USING (pid) WHERE a.usename = current_user GROUP BY 1, 2, 3, 4;' | docker run --rm -i postgres:16 psql $app
+     ```
+     A row with an empty `application_name` is the API's pooled connection, and `psql` is yours.
+7. **Clean up:** `Set-Clipboard -Value ' '`, then `Remove-Variable pw, app, b`, and close the window.
+
+**Done in production on 25 October 2026:**
+
+| Step | Result |
+|---|---|
+| Pre-check | PostgreSQL 18.6; `storefront_9f4i_user` has `CREATEROLE` and owns the 12 tables |
+| Role script | Role created with a connection limit of 25 |
+| Password | Set with the statement method in step 3, after the `\password` paste problem |
+| Sign-in test | Connected as `storefront_app`; `CREATE TABLE` refused with `permission denied for schema public` |
+| `ConnectionStrings__Storefront` | Switched to `storefront_app` on Render; the deploy went live |
+| Readiness | 200 |
+| Sign-in on the site | Works |
+| Verification query | One API connection as `storefront_app`, over the private network, **TLS 1.3** |
+
+So the internal connection is encrypted without any setting. Adding `;SSL Mode=Require` would make it fail rather than fall back to plain text; optional, now that TLS is confirmed there.
+
+Checkout couldn't be tested that evening, for an unrelated reason: FakeStoreAPI answered **403** to the API's requests from Render (19:02 and 19:13 UTC), while answering 200 to a home connection. That points to its bot protection blocking Render's addresses. The API failed safely: 502 `UPSTREAM_UNAVAILABLE`, no order created, the cart kept, a reference shown. *Open:* retry the next day. If it keeps happening, the choices are to price checkout from the saved catalogue copy for a limited time, or to serve the catalogue from our own database.
+
+**Rollback:** set the username and password in `ConnectionStrings__Storefront` back to the default user's; they're in the database's **Internal Database URL** on Render. Save. The role can stay; it's unused until something connects with it.
+
+**Later migrations:** unchanged. Run them as the owner with the External Database URL (section 11). New tables are granted automatically.

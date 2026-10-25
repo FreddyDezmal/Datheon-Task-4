@@ -646,3 +646,20 @@ Actions are pinned by commit SHA, and the scanners by checksum. The workflow tok
 The first full-history secret scan found one result, the sample `Idempotency-Key` UUID in `Storefront.Api.http`. It's a false positive, consistent with T13, and is listed in `.gitleaksignore`.
 
 **SA-20:** the repository could be cloned without credentials, so it appears to be public. Nothing secret is in it (the secret scan and T13 agree), but the service URLs and the certificate thumbprint in these documents are visible to anyone. The owner should decide whether to keep it public.
+
+### 14.8 Follow-ups on 25 October 2026: CI live (SA-18), least-privilege database role (SA-13)
+
+**SA-18: fixed.** CI is live and gating production.
+- Both Render services use **Auto-Deploy: After CI Checks Pass**.
+- The `ci-bro` ruleset blocks force pushes to `main` and its deletion.
+- The weekly **Security scan** passed both jobs on its first run: NuGet advisories, the full `npm audit`, and Trivy on the container image. Those were three of the checks section 8 couldn't complete.
+- CI found and fixed one real defect on its first run: product title links overlapping their "Add to cart" buttons. It also exposed two timing-dependent test problems, now fixed. Details are in `Testing.md`, section 2a.
+
+**SA-13: fixed for the role; TLS confirmed.** The API now connects as `storefront_app`, created by `tools/db/create-app-role.sql` (`Deployment.md`, section 13).
+- **Access:** row access only (no DDL, no roles, no `TRUNCATE`); a read-only migration history; tables from future migrations granted automatically.
+- **Limits:** 25 connections, a 30-second statement timeout, and a 60-second limit on idle open transactions.
+- **Rehearsal:** done locally against a non-superuser owner, including the smoke test (68 of 68) and the checkout stress tests as `storefront_app`.
+- **In production:** the API's connection is `storefront_app`, over Render's private network, with TLS 1.3. Migrations still run as the owner over the External URL with `sslmode=require`.
+- **Still open (manual):** restricting inbound access to the database on Render.
+
+**New, open: FakeStoreAPI refuses requests from Render.** On the evening of 25 October 2026, checkout failed twice with 502 `UPSTREAM_UNAVAILABLE`, because FakeStoreAPI answered 403 to the API while answering 200 elsewhere. The API failed safely, as designed: no order, the cart kept, a reference shown. It's an availability risk of depending on a third-party demo API, not a security flaw. To be retried; the options are in `Deployment.md`, section 13.
