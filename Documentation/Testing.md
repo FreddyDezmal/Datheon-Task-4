@@ -165,6 +165,13 @@ Check the first run of both workflows in the **Actions** tab.
 
   The first dev run had one failure, and its log wasn't kept, so which test failed isn't known. A tenfold slowdown is far beyond a real runner. If a flaky failure shows up in CI, the job's Playwright report artifact has the trace.
 
+**Third run: all six checks green**, but the production browser job took 8m17s, of which the tests took 46.6s. `npx playwright install --with-deps chromium` spent 6m58s, almost all of it apt downloading 25.9 MB of fonts and Xvfb from a slow Ubuntu mirror (67 kB/s). The log shows every library Chromium needs was already on the runner. The job now:
+- installs only the headless shell (`--only-shell`), which is what Playwright launches for headless runs with no `channel` set;
+- caches it per Playwright version (`actions/cache` v6.1.0, pinned by SHA);
+- skips the apt step.
+
+A missing library would stop the browser from launching, so this can't pass silently.
+
 ---
 
 ## 3a. Availability safeguards (23 October 2026, live availability pass)

@@ -158,9 +158,24 @@ jobs:
       - name: Build the API
         run: dotnet build backend/Storefront.Api --configuration Debug
 
+      # The headless shell only (what headless runs use), cached per Playwright version. No --with-deps:
+      # the runner image already has every library Chromium needs, and the apt step it adds (fonts and
+      # Xvfb this suite doesn't use) once took 7 minutes on a slow mirror. A missing library would make
+      # the browser fail to launch, so this can't pass silently.
+      - name: Playwright version
+        id: playwright
+        working-directory: frontend
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Chromium
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium-headless-shell
+
       - name: Install Chromium
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --only-shell chromium
 
       - name: Run
         working-directory: frontend
