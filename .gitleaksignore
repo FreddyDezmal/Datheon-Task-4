@@ -1,0 +1,5 @@
+# Reviewed gitleaks findings that aren't secrets (see Documentation/Testing.md, "Continuous integration").
+# Each line is a finding's fingerprint: commit:file:rule:line.
+
+# The sample Idempotency-Key (a random UUID) in the example requests; idempotency keys aren't credentials.
+396bcbdd8b5d9017f24b2cb9c0e4bab34af3b584:backend/Storefront.Api/Storefront.Api.http:generic-api-key:60

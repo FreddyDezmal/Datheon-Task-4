@@ -629,3 +629,20 @@ Done by the owner, in the order of 14.5; results reported back and recorded here
 | Browser: sign in, browse, cart, sign out, reload | Works; stays signed out after reload; no CSP violations in the console |
 
 What this confirms in production: SA-04 (pool cap; the provider is PostgreSQL), SA-09, SA-11 (runtime 10.0.13, past the 10.0.7 fix), SA-12, and SA-02 sign-out. Still open: 14.5 steps 6–7, and the items in 14.4.
+
+### 14.7 Follow-up: continuous integration (SA-18), 25 October 2026
+
+SA-18 is now **fixed in code**; turning on the gating is a manual dashboard step. `.github/workflows/ci.yml` builds and tests every push and pull request:
+- the backend, with all 416 tests including PostgreSQL, failing on any skipped test;
+- the frontend: typecheck, tests with coverage thresholds, and the production build;
+- both browser-test modes;
+- the Docker image;
+- a full-history secret scan.
+
+`.github/workflows/security.yml` runs weekly and covers the checks from section 8 that couldn't run during the audit: `dotnet list package --vulnerable --include-transitive`, `npm audit`, and a Trivy scan of the container image.
+
+Actions are pinned by commit SHA, and the scanners by checksum. The workflow token is read-only. Details and local verification are in `Testing.md`, section 2a, and the owner's steps in `Deployment.md`, section 12 (Render "After CI Checks Pass" on both services, and a ruleset on `main`).
+
+The first full-history secret scan found one result, the sample `Idempotency-Key` UUID in `Storefront.Api.http`. It's a false positive, consistent with T13, and is listed in `.gitleaksignore`.
+
+**SA-20:** the repository could be cloned without credentials, so it appears to be public. Nothing secret is in it (the secret scan and T13 agree), but the service URLs and the certificate thumbprint in these documents are visible to anyone. The owner should decide whether to keep it public.

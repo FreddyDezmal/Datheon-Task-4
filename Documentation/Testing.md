@@ -92,6 +92,58 @@ All report folders are git-ignored.
 
 ---
 
+## 2a. Continuous integration (GitHub Actions)
+
+Two workflows live in `.github/workflows/`.
+
+**`ci.yml` runs on every push to `main`, every pull request, and by hand ("Run workflow").** With Render's auto-deploy set to **After CI Checks Pass**, a commit reaches production only when every job below passes:
+
+| Job | What it runs | Fails when |
+|---|---|---|
+| Backend build and tests | `dotnet restore`, `dotnet build -c Release`, `dotnet test -c Release` against a throwaway PostgreSQL 16 service container, then `tools/ci/check_test_results.py` | A build warning or error; a NuGet package with a known advisory (`TreatWarningsAsErrors` turns NuGet's audit into an error); any test failing **or skipped**; fewer than 416 tests found |
+| Frontend typecheck, tests and build | `npm ci`, `npm audit --omit=dev`, `npm run typecheck`, `npm run test:coverage`, `npm run build` with the production API address | An advisory against the shipped packages (React, React DOM); a type error; a failing test or a coverage threshold missed; source maps or `localhost`/`127.0.0.1` in `dist/` |
+| Browser tests (dev) and (production) | The full Playwright suite twice: on the Vite dev server, and on the production bundle under the site's security headers | Any failing journey or CSP violation |
+| Container image builds | `docker build --pull` of `backend/`, as Render builds it; then checks the image holds `Storefront.Api.dll` and not `appsettings.Development.json` | The Dockerfile breaks; SA-15 regresses |
+| Secret scan | gitleaks over the **whole** history (a secret deleted later is still exposed) | Any finding not listed in `.gitleaksignore` |
+
+**`security.yml` runs every Monday at 07:17 (Johannesburg), on pull requests that change dependencies, and by hand.** It doesn't gate deploys, because its results change when advisories are published, not when the code does. A failed scheduled run emails the repository owner.
+
+| Job | Fails when |
+|---|---|
+| Dependency advisories | `dotnet list package --vulnerable --include-transitive` lists anything; `npm audit` (development tooling included) finds a high or critical advisory |
+| Container image scan | Trivy finds a high or critical vulnerability with a fix available in the built image. Usually fixed by rebuilding the image ("Clear build cache & deploy" on Render) |
+
+**Why the skipped-test check exists.** The PostgreSQL tests skip themselves when `STOREFRONT_TEST_POSTGRES` isn't set, and `dotnet test` still reports success. *Verified*: without the variable, the suite printed `Passed! … Skipped: 16` with exit code 0. `check_test_results.py` reads the TRX files and fails the run unless every test ran and passed. Raise its minimum (`416`) when tests are added.
+
+**Supply chain.**
+- **Actions:** every third-party action is pinned to a full commit SHA, with the version in a comment.
+- **Tools:** gitleaks and Trivy are downloaded from their GitHub releases and checked against pinned SHA-256 checksums, rather than run as third-party actions. Trivy 0.69.4 was a compromised release (CVE-2026-33634), so the pin is 0.75.0.
+- **Permissions:** the workflows get a read-only token, and checkout doesn't keep credentials.
+
+To update a pin, take the new tag's commit SHA from the action's releases page, or the new checksum from the tool's `checksums.txt`.
+
+**Reviewed false positive.** The scan flags the sample `Idempotency-Key` UUID in `Storefront.Api.http`. It's an example request, not a credential, so `.gitleaksignore` lists that finding's fingerprint. A new finding of the same kind still fails.
+
+**What was verified before the first run on GitHub (25 October 2026).** Each job's steps were run in a fresh clone of the repository with the workflows committed on top. Tooling: `actionlint` 1.7.12 with shellcheck (clean), .NET 10, Node 22, PostgreSQL 16, Chromium.
+
+| Check | Result |
+|---|---|
+| Backend tests | 416 of 416 ran and passed |
+| Skipped-test guard | Fails on skipped tests, on no result files, and on too few tests |
+| Frontend | `npm audit` 0, `npm run typecheck` passed, 299 tests passed, thresholds met. The bundle is `index-Bk02M7jR.js`, the same file Render serves |
+| Bundle guard | Fails on a `localhost` API address and on source maps |
+| Browser tests | dev: 18 passed and 3 skipped (header tests that need the production build); production: 21 passed |
+| Secret scan | 14 commits, no leaks. A token committed and then deleted is caught (exit 1) |
+
+Three steps need services this workspace can't reach, so their first real run is on GitHub:
+- the Docker image build and its contents check;
+- `dotnet list package --vulnerable`;
+- the Trivy scan.
+
+Check the first run of both workflows in the **Actions** tab.
+
+---
+
 ## 3a. Availability safeguards (23 October 2026, live availability pass)
 
 Run in the same Linux workspace. These results show the safeguards behave as designed; they are not evidence of uptime.
@@ -192,9 +244,9 @@ Each safeguard was broken on purpose, the suite was run, and the change was put 
 ## 5. What is not covered, and why
 
 **Automated, but weak or indirect**
-- **Real token revocation:** Identity bearer tokens can't be revoked, so "sign-out invalidates the token" isn't testable. Tests check that the browser forgets the tokens.
-- **Rate limits per IP:** one test (login is throttled) runs with a low limit; the checkout limit is only exercised by the smoke test.
-- **SQLite only:** locking and concurrency behaviour may differ on a server database (§1).
+- **Token revocation** is now tested end to end: server-side sessions (Security-Audit.md, SA-02) make sign-out, refresh-token reuse and password changes end a session, and both tokens are then refused. The browser suite checks the old refresh token gets 401 after sign-out.
+- **Rate limits per IP:** login throttling, IPv6 /64 grouping and per-account sign-in protection are tested; the checkout limit is only exercised by the smoke test.
+- **Database behaviour:** the SQLite suites run everywhere. The PostgreSQL suite runs where `STOREFRONT_TEST_POSTGRES` is set, which includes CI (§2a), where skipping it fails the run.
 - **Unreachable branches:** `Program.cs` (83.8%) isn't covered outside Development (HSTS, HTTPS redirect, warning when CORS isn't configured), and nor are the Identity cookie redirect handlers, which the API never uses because it relies on bearer tokens. They're simple configuration; a Production-mode smoke run would cover them.
 - **Frontend defensive branches:** a few, such as aborting a checkout request when the dialog closes mid-request (closing is disabled while submitting), and the double-submit ref, which is already covered by the disabled button.
 

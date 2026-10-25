@@ -88,7 +88,12 @@ storefront/
 │   ├── Testing/ManualTestPlan.md    # checklist for human testing (devices, screen readers, zoom)
 │   └── Audits/                      # AUDIT.md (audit report) and storefront-audit.patch
 ├── .gitignore
+├── .gitleaksignore                  # reviewed secret-scan false positives (by fingerprint)
+├── .github/workflows/
+│   ├── ci.yml                       # build, all tests, browser tests, image build, secret scan; gates deploys
+│   └── security.yml                 # weekly dependency and container vulnerability scans
 ├── tools/
+│   ├── ci/check_test_results.py     # fails CI if any backend test was skipped
 │   ├── fakestore_mock.py            # optional offline stand-in for FakeStoreAPI, with failure modes
 │   └── smoke_test.py                # end-to-end API checks (endpoints, repricing, idempotency, accounts, CORS, Swagger, outages)
 ├── backend/
@@ -495,6 +500,8 @@ Responsive: layouts were checked at 320, 375, 768, 1024 and 1440 px wide with no
 ---
 
 ## 9. Verification status
+
+**Continuous integration.** From 25 October 2026, GitHub Actions builds and tests every push and pull request (`.github/workflows/ci.yml`), and scans dependencies and the container image weekly (`security.yml`). See `Documentation/Testing.md`, section 2a. The tables below are the manual verification runs from before CI existed.
 
 **Current version (live availability pass).** Verified on 23 October 2026 in a Linux workspace (same tools as below). These are test results, not uptime evidence: nothing has been deployed. Details are in `Documentation/Availability.md` and `Documentation/Testing.md`.
 

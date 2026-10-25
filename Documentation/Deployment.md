@@ -455,3 +455,21 @@ The changes from `Documentation/Security-Audit.md`, section 14, need one databas
 
 Close the PowerShell window afterwards.
 
+
+## 12. Continuous integration and deploy gating
+
+GitHub Actions builds and tests every push (`.github/workflows/ci.yml`; what each job checks is in `Testing.md`, section 2a). On its own, that only reports. These settings make it gate production. They're *not run here*: they're dashboard settings for the owner.
+
+**1. Push the workflows and check the first run.** After pushing, open the repository's **Actions** tab. **CI** should show five jobs (the browser tests run twice), all green, in about 10 minutes. Run **Security scan** once by hand (**Run workflow**). Its first result shows whether the current image or packages have known advisories.
+
+**2. Render: deploy only commits that passed.** On **both** services (`datheon-task-4` and `Datheon-Task-4-1`), go to **Settings → Build & Deploy → Auto-Deploy** and choose **After CI Checks Pass**. Render then waits for every check on the commit and deploys only if all pass. It doesn't deploy if a check fails, or if a commit has no checks at all. The previous version keeps serving. *Manual Deploy* still works, for an emergency.
+
+**3. GitHub: protect `main`.** Under **Settings → Rules → Rulesets → New branch ruleset**, set the target to the default branch, and enable:
+- **Restrict deletions** and **Block force pushes.** This keeps the history that CI and the secret scan rely on.
+- *Optional, stricter:* **Require a pull request before merging**, plus **Require status checks to pass**, adding the CI job names (`Backend build and tests`, `Frontend typecheck, tests and build`, `Browser tests (dev)`, `Browser tests (production)`, `Container image builds`, `Secret scan`). Direct pushes to `main` are then refused, and every change goes through a pull request. For one developer, step 2 alone already keeps an untested commit out of production. This option adds review and stops a broken commit from landing on `main` at all.
+
+**4. Notifications.** GitHub emails you when a workflow you triggered fails, including the weekly security scan. Check under **GitHub → Settings → Notifications → Actions**.
+
+**When CI fails on `main`:** nothing is deployed. Fix the problem and push again. The test report or Playwright report is attached to the failed run under **Artifacts**. For a failed **Security scan**:
+- update the named package;
+- or, for a base-image finding, run "Clear build cache & deploy" on Render. CI's image build always pulls fresh base images, so a rebuild picks up their patches.
