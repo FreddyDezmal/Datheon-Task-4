@@ -16,13 +16,23 @@ const WIDTHS = [
   { width: 1440, height: 900 },
 ];
 
-/** Things that commonly break at small widths: sideways scrolling and controls pushed off-screen. */
-async function layoutProblems(page: Page) {
-  // Measure the settled layout, not a drawer or dialog halfway through sliding in.
-  // Endless animations (the loading shimmer, spinners) are ignored.
+/**
+ * Waits until animations and transitions have finished, so checks measure the settled page, not a
+ * drawer or dialog halfway through sliding or fading in. Mid-fade, colours are blended with the
+ * backdrop: axe measured the details dialog's button at 3.17:1 instead of its real contrast.
+ * Endless animations (the loading shimmer, spinners) are ignored.
+ */
+async function settled(page: Page) {
+  // Two frames first, so a transition triggered by the last state change has started and is counted.
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
   await page.waitForFunction(() =>
     document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity),
   );
+}
+
+/** Things that commonly break at small widths: sideways scrolling and controls pushed off-screen. */
+async function layoutProblems(page: Page) {
+  await settled(page);
   return page.evaluate(() => {
     const viewport = document.documentElement.clientWidth;
     const problems: string[] = [];
@@ -42,8 +52,10 @@ async function layoutProblems(page: Page) {
     // No two controls in the same layer overlap, anywhere on the page (not only in the visible part).
     // An overlap shrinks a touch target below WCAG 2.5.8's 24px, and the top element can take the
     // other's taps. A link's box includes lines hidden by a line clamp, which is exactly the case
-    // this catches. Layers (the page, the sticky header, a dialog) are meant to stack, and how they
-    // cover each other depends on scrolling, so only controls in the same layer are compared.
+    // this catches. Layers (the page, the sticky header, a dialog) are meant to stack, and content
+    // scrolls under a fixed header, so how those cover each other depends on scrolling. Only controls
+    // in the same layer and the same scroll container are compared: their positions relative to each
+    // other never change.
     const name = (el: Element) => `${el.tagName.toLowerCase()} "${(el.getAttribute('aria-label') ?? el.textContent ?? '').trim().slice(0, 40)}"`;
     const layerOf = (el: Element) => {
       for (let node: Element | null = el; node; node = node.parentElement) {
@@ -51,6 +63,13 @@ async function layoutProblems(page: Page) {
       }
       return null;
     };
+    const scrollerOf = (el: Element) => {
+      for (let node = el.parentElement; node; node = node.parentElement) {
+        if (/(auto|scroll)/.test(getComputedStyle(node).overflowY + getComputedStyle(node).overflowX)) return node;
+      }
+      return null;
+    };
+    const sameGroup = (a: Element, b: Element) => layerOf(a) === layerOf(b) && scrollerOf(a) === scrollerOf(b);
     const controls = [...document.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')].filter((el) => {
       if (el.closest('[inert]') || getComputedStyle(el).visibility === 'hidden') return false;
       const box = el.getBoundingClientRect();
@@ -59,7 +78,7 @@ async function layoutProblems(page: Page) {
     for (let i = 0; i < controls.length; i++) {
       for (let j = i + 1; j < controls.length; j++) {
         const [a, b] = [controls[i], controls[j]];
-        if (a.contains(b) || b.contains(a) || layerOf(a) !== layerOf(b)) continue;
+        if (a.contains(b) || b.contains(a) || !sameGroup(a, b)) continue;
         const [r, s] = [a.getBoundingClientRect(), b.getBoundingClientRect()];
         // A button placed inside a field (Show password) is fine when it sits within the padding
         // the field reserves for it, so the text never runs underneath.
@@ -80,6 +99,7 @@ async function layoutProblems(page: Page) {
 }
 
 async function scan(page: Page) {
+  await settled(page);
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
     // Decorative product images use alt="" on purpose: the product title is the accessible name.

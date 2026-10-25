@@ -150,6 +150,21 @@ Check the first run of both workflows in the **Actions** tab.
 - **New regression check:** the layout checks now fail when any two controls in the same layer overlap, anywhere on the page, so the test no longer depends on scroll position. A button inside a field is allowed only within the padding the field reserves for it.
 - **Verified:** with the old CSS, the check reports all six cards, and axe flags product 14 once it's in view. With the fix, the full browser suite passes in both modes on Chromium 141 and 153, and axe passes with each of the 20 cards in view.
 
+**Second run: two timing-dependent test failures, no product defect.**
+- **The axe scan ran mid-animation.** axe measured the details dialog's button at `#c1ccc7` on `#4d7466` (3.17:1). That's the white-on-`#1d5442` button partway through its fade-in. `scan()` now waits for running animations and transitions to finish, as the layout check already did.
+  - *Reproduced* by slowing every animation to 10% speed through the DevTools protocol: the previous test failed on the same two elements, and the new one passes.
+- **The overlap check compared a field scrolled out of view with the dialog's header.** When the checkout form was scrolled 264–300px, the name field had moved above the form's visible area, behind the header, so its box overlapped the close button (23px on GitHub). Controls are now compared only within the same layer **and** the same scroll container, where their positions relative to each other can't change.
+  - *Reproduced* by sweeping the form's scroll position in 4px steps: the previous check failed at 284px, and the new one passes.
+  - The product-card defect is still caught: with the old CSS, the check reports all six cards.
+- **The whole browser suite was then run with animations at 10% speed**, as a stand-in for a slower machine:
+
+  | Mode | Runs | Passed |
+  |---|---|---|
+  | Production | 1 | All |
+  | Dev | 5 | 4 |
+
+  The first dev run had one failure, and its log wasn't kept, so which test failed isn't known. A tenfold slowdown is far beyond a real runner. If a flaky failure shows up in CI, the job's Playwright report artifact has the trace.
+
 ---
 
 ## 3a. Availability safeguards (23 October 2026, live availability pass)
