@@ -433,7 +433,11 @@ The changes from `Documentation/Security-Audit.md`, section 14, need one databas
    Get-Content postgresql-migrations.sql -Raw | docker run --rm -i postgres:16 psql $db -v ON_ERROR_STOP=1
    'SELECT "MigrationId" FROM "__EFMigrationsHistory" ORDER BY 1;' | docker run --rm -i postgres:16 psql $db
    ```
-   Three migrations should be listed, the last `…_AddUserSessions`. If the deploy happens first instead, readiness reports the pending migration (503), and Render keeps the previous version serving.
+   **Before applying, check it's the right database.** Run only the last command first. It should list exactly the two PostgreSQL migrations, `20261023135229_InitialCreate` and `20261023192043_AddDataProtectionKeys`. If you see `20261022204121_…` or `20261023192040_…` instead (the SQLite IDs), or nothing at all, stop: the URL points at the wrong database. An empty `$db` (for example in a new PowerShell window) makes `psql` fail with `connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed`, without touching anything.
+
+   After applying, three migrations should be listed, the last exactly `20261024190035_AddUserSessions`. The SQLite migration is `20261024190032_AddUserSessions`; if that one appears, the wrong script was applied, and readiness reports the PostgreSQL migration as pending. If the deploy happens before the migration, readiness reports it pending (503), and Render keeps the previous version serving.
+
+   Reading the output: `NOTICE: relation "__EFMigrationsHistory" already exists, skipping` and `CREATE TABLE` are normal. One `START TRANSACTION … COMMIT` block per migration; the `DO` lines of already-applied migrations do nothing.
 2. **Check that no account has 2FA switched on.** Sign-in no longer looks at Identity's 2FA flag, and the endpoint that set it is gone. Expect `0`:
    ```powershell
    'SELECT count(*) FROM "AspNetUsers" WHERE "TwoFactorEnabled";' | docker run --rm -i postgres:16 psql $db
@@ -443,7 +447,8 @@ The changes from `Documentation/Security-Audit.md`, section 14, need one databas
 5. **Static site headers:** add the six headers in section 10 to the Static Site and save. That redeploys the site; the same files are served with the new headers.
 6. **Check:**
    - `curl.exe -sI https://datheon-task-4-1.onrender.com/` shows the headers;
-   - `curl.exe -sI https://datheon-task-4.onrender.com/api/orders` shows `Cache-Control: no-store`;
+   - `curl.exe -sI https://datheon-task-4.onrender.com/api/orders` shows `Cache-Control: no-store` (the status is 405, because `-I` sends `HEAD` and the route only accepts `GET`); `curl.exe -s -o NUL -w "%{http_code}" https://datheon-task-4.onrender.com/api/orders` prints `401`;
+   - the static site's `strict-transport-security` is Render's own (`max-age=315360000; includeSubdomains; preload`), which replaces the one configured: that's expected and stronger;
    - sign in, sign out, and confirm that a reload stays signed out;
    - the browser console stays free of `Refused to …` CSP messages.
 7. **Periodically, "Clear build cache & deploy"** on the API, so the image picks up .NET and OS patches (Render had reused the cached runtime layers). The startup log then shows the new patch level.

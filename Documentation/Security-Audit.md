@@ -602,9 +602,9 @@ Corrections to earlier working notes: a suspicion that EF's `CanConnect` opened 
 - **Deploy impact:** every token issued before this change is refused (it has no session), so every signed-in shopper signs in once more.
 - **Not done:** SA-07, SA-13, SA-15 (trimming), SA-16 (race log level, alerting), SA-17, SA-18, SA-20; and the checks in section 8 that need tools or access this workspace doesn't have (package vulnerability scan, container scan, ZAP, live IPv6 test).
 
-### 14.5 Manual production steps (not done)
+### 14.5 Manual production steps
 
-These are for the owner, in this order; the details are in `Deployment.md`, section 11.
+*Steps 1–5 were done by the owner on 25 October 2026; see 14.6. Steps 6 and 7 are still open.* In this order; the details are in `Deployment.md`, section 11.
 1. Apply the `AddUserSessions` migration to the production database **before** pushing (idempotent script, with the connection string entered via `Read-Host`).
 2. Run the 2FA check query; it should return 0.
 3. Push to `main`, so Render deploys. Every signed-in shopper has to sign in once more.
@@ -612,3 +612,20 @@ These are for the owner, in this order; the details are in `Deployment.md`, sect
 5. Run the verification `curl` commands (`Deployment.md`, section 11).
 6. Now and then, run "Clear build cache & deploy" on the API service, so the runtime gets patched (SA-11); the startup log shows the version.
 7. Earlier open items: a least-privilege role and `SSL Mode=Require`, and restricted inbound database access (SA-13); 2FA on GitHub and Render, and branch protection (SA-18); backups (SA-17).
+
+### 14.6 Production rollout (25 October 2026)
+
+Done by the owner, in the order of 14.5; results reported back and recorded here. No secrets were shared.
+
+| Step | Result |
+|---|---|
+| Pre-check: `__EFMigrationsHistory` before applying | `20261023135229_InitialCreate`, `20261023192043_AddDataProtectionKeys`: the PostgreSQL migration set, so the right database |
+| Idempotent script applied with `psql -v ON_ERROR_STOP=1` | No errors; the two existing migrations were skipped; one transaction added `UserSessions` |
+| History after applying | 3 rows, the last `20261024190035_AddUserSessions` |
+| 2FA check (`TwoFactorEnabled`) | `0` |
+| Commit `cb809d2` pushed; API deploy log | `Using PostgreSQL … (connection pool up to 20)`; `Storefront API started in Production on .NET 10.0.13`; sign-in keys encrypted with certificate A3402286…91CB; no pending-migration warning; "Your service is live" |
+| Static Site headers added (path `/*`) | `curl -sI` on the site: the exact CSP, `nosniff`, `DENY`, `strict-origin-when-cross-origin`, `same-origin`, and HSTS (Render's own, `max-age=315360000; includeSubdomains; preload`) |
+| `curl -sI /api/orders` on the API | `Cache-Control: no-store` (405 for `HEAD`, as expected) |
+| Browser: sign in, browse, cart, sign out, reload | Works; stays signed out after reload; no CSP violations in the console |
+
+What this confirms in production: SA-04 (pool cap; the provider is PostgreSQL), SA-09, SA-11 (runtime 10.0.13, past the 10.0.7 fix), SA-12, and SA-02 sign-out. Still open: 14.5 steps 6–7, and the items in 14.4.
