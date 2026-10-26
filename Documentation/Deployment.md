@@ -25,7 +25,7 @@ Production settings, as environment variables:
 | Variable | Example | Notes |
 |---|---|---|
 | `Database__Provider` | `PostgreSql` | Required |
-| `ConnectionStrings__Storefront` | `Host=…;Port=5432;Database=storefront;Username=storefront_app;Password=…;SSL Mode=Require` | Npgsql **key=value** format. A `postgres://user:pass@host/db` URL (the form Render shows) must be converted. Use the TLS mode your provider requires. Keep it in the platform's secret settings, never in a file. |
+| `ConnectionStrings__Storefront` | `Host=…;Port=5432;Database=storefront;Username=storefront_app;Password=…;SSL Mode=Require` (live since 26 October 2026: the internal host, `storefront_app`, TLS required) | Npgsql **key=value** format. A `postgres://user:pass@host/db` URL (the form Render shows) must be converted. Use the TLS mode your provider requires. Keep it in the platform's secret settings, never in a file. |
 | `AllowedHosts` | `storefront-api.onrender.com` | **Required.** The default (`localhost;127.0.0.1`) answers 400 to any other host name (*verified*). See blockers. |
 | `Cors__AllowedOrigins__0` | the Static Site's origin, e.g. `https://<site>.onrender.com` | The frontend's exact origin: scheme and host, no path, no trailing slash (section 10). It replaces the `http://localhost:5173` default. |
 | `PORT` | set by Render | The image falls back to 10000 |
@@ -555,7 +555,7 @@ It can't create, alter, drop or truncate tables, create functions, roles, schema
 | Sign-in on the site | Works |
 | Verification query | One API connection as `storefront_app`, over the private network, **TLS 1.3** |
 
-So the internal connection is encrypted without any setting. Adding `;SSL Mode=Require` would make it fail rather than fall back to plain text; optional, now that TLS is confirmed there.
+So the internal connection is encrypted without any setting. **On 26 October 2026, `;SSL Mode=Require` was added** to `ConnectionStrings__Storefront`, so the API now refuses to connect at all rather than ever fall back to plain text. After the redeploy, `/health/ready` returned 200 (0.58 s), which proves the connection is encrypted: with no TLS available, the API couldn't connect and readiness would return 503. To undo it, remove that part of the setting and save.
 
 Checkout couldn't be tested that evening, for an unrelated reason: FakeStoreAPI answered **403** to the API's requests from Render (19:02 and 19:13 UTC), while answering 200 to a home connection. That points to its bot protection blocking Render's addresses. The API failed safely: 502 `UPSTREAM_UNAVAILABLE`, no order created, the cart kept, a reference shown. *Open:* retry the next day. If it keeps happening, the choices are to price checkout from the saved catalogue copy for a limited time, or to serve the catalogue from our own database.
 

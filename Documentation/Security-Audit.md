@@ -666,6 +666,7 @@ The first full-history secret scan found one result, the sample `Idempotency-Key
 
 ### 14.9 Follow-ups on 26 October 2026: external database access (SA-13), backups (SA-17)
 
+- **SA-13, TLS required:** `;SSL Mode=Require` was added to the API's connection string. Readiness returned 200 afterwards, so the private-network connection is encrypted and can no longer fall back to plain text.
 - **SA-13, inbound access: fixed.** The database's external URL now accepts one `/32` address, the owner's, instead of Render's default `0.0.0.0/0`. The API's private-network connection is unaffected (`/health/ready` 200). With the role and TLS work in 14.8, **SA-13 is closed**.
 - **SA-17, backups: mitigated, not solved.**
   - A manual `pg_dump` plus restore check is documented (`Deployment.md`, section 14). The first backup restored with no errors: 2 users, 2 orders, 3 migrations.
