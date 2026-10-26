@@ -292,16 +292,83 @@ Before it expires, or straight away if the `.pfx` or its password may have leake
 
 **After a leak, don't wait:** skip step 3. Set only the new certificate, delete the rows in `DataProtectionKeys`, and restart, as in step 5 above. Everyone signs in again, but nothing signed with the leaked key is accepted any more.
 
-## 9. Free plan: replacing an expired database
+## 9. Free plan: moving to a new Free database, keeping the data
 
-A Free Render PostgreSQL database expires 30 days after it's created and has no backups (the current one: created 24 October 2026; see section 14 for dates and backups). When it expires, its data is gone and the API's readiness check fails. Upgrading to a paid plan before then keeps the data. Otherwise, set up a new one the same way:
+A Free Render database expires **30 days after it's created**. It's then unreachable, and Render deletes it 14 days later. Free databases have no backups. The owner's choice (26 October 2026) is to stay on the Free plan, so the database is moved to a new Free one before each expiry.
 
-1. **Create** a new PostgreSQL database on Render, in the same region as the web service.
-2. **Apply the migrations** to it with the reviewed script, as in section 3 (steps 1, 2 and 4), using its **External** URL. Check that both migrations are listed in `__EFMigrationsHistory`.
-3. **Point the service at it:** update `ConnectionStrings__Storefront` with the new database's **Internal** details, in key=value format as before, including `;GSS Encryption Mode=Disable`. Saving redeploys.
-4. **Check** `/health/ready` is 200 with `"database":"Healthy"`.
+**Three rules shape the move:**
+- **Only one Free database can exist per workspace** (Render: "Only one Free Render Postgres database can be active for any given workspace"). The new one can't be created until the old one is deleted, so the database is down while the move happens: plan **20–30 minutes**.
+- **An expired database can't be read**, so the move must happen **before** the expiry. Moving early just restarts the 30-day clock early, so do it in the last week. For the current database (created 24 October 2026, expires about 23 November): **between 16 and 20 November 2026.**
+- **Deleting is irreversible.** The backup is the only copy of the data, so it's taken *right before* the delete, and checked by restoring it first. Anything written between the backup and the delete is lost, so pick a quiet time.
 
-Orders and accounts from the old database are lost, and everyone signs in again (the sign-in keys lived in that database too). The Data Protection certificate doesn't change: the new keys are encrypted with it from the start, so step 5 of section 8 isn't needed.
+**What carries over:** accounts, orders, sessions and the sign-in keys. The keys are encrypted with the same certificate, so shoppers stay signed in. **What doesn't:** the `storefront_app` role and its password (roles belong to the server, not the dump), and the IP rule. Both are recreated below.
+
+**Rehearsed** on 26 October 2026, on PostgreSQL 16. A dump with `--no-owner --no-privileges` was restored into a fresh database, owned by a non-superuser with Render's privileges and with no `storefront_app` role:
+- `pg_restore --exit-on-error` succeeded, and every table matched the source exactly: 3 users, 362 orders, 530 order lines, 3 sessions, 1 key, 3 migrations. The tables are owned by the new owner.
+- `create-app-role.sql` ran cleanly: 11 tables with data access, 0 with more, and the history read-only.
+- The API, as `storefront_app`, was ready and passed the smoke test 68 of 68, with 0 permission errors.
+
+**On the day.** Use one PowerShell window in the `storefront` folder.
+
+1. **Set the old database's URL** and record its live row counts:
+   ```powershell
+   $db = Read-Host "Paste the OLD External Database URL"; $db = "$db" + "?sslmode=require"
+   $counts = 'SELECT (SELECT count(*) FROM "AspNetUsers") AS users, (SELECT count(*) FROM "Orders") AS orders, (SELECT count(*) FROM "OrderLines") AS lines, (SELECT count(*) FROM "__EFMigrationsHistory") AS migrations;'
+   $counts | docker run --rm -i postgres:18 psql $db
+   ```
+2. **Back up, and check the backup restores as a non-superuser**, the way Render will restore it:
+   ```powershell
+   $dir = "$HOME\Documents\storefront-backups"; New-Item -ItemType Directory -Force $dir | Out-Null
+   $file = "storefront-move-$(Get-Date -Format yyyyMMdd-HHmm).dump"
+   docker run --rm -v "${dir}:/backup" postgres:18 pg_dump $db --format=custom --no-owner --no-privileges --file "/backup/$file"
+   docker run -d --name sf-restore-test -e POSTGRES_PASSWORD=restore-test -v "${dir}:/backup" postgres:18 | Out-Null
+   Start-Sleep 10
+   docker exec sf-restore-test psql -U postgres -qc "CREATE ROLE owner_check LOGIN CREATEROLE CREATEDB"
+   docker exec sf-restore-test createdb -U postgres -O owner_check check
+   docker exec sf-restore-test pg_restore -U owner_check -d check --no-owner --no-privileges --exit-on-error "/backup/$file"
+   $counts | docker exec -i sf-restore-test psql -U owner_check -d check
+   docker rm -f sf-restore-test | Out-Null
+   ```
+   **Continue only if** `pg_restore` printed no errors **and** the counts equal step 1's. If anything differs, stop: the old database is untouched.
+3. **Delete the old database.** On Render: the database → **Settings** → **Delete Database**. From here until step 8, the API's readiness is 503, and sign-in and checkout fail.
+4. **Create the new one:** **New → Postgres**, **Free**, the **same region (Frankfurt)** as the API, **PostgreSQL 18**. Wait until it shows **Available**.
+5. **Allow only your IP:** the new database → **Info** → **Networking**. Replace `0.0.0.0/0` with your IP and `/32` (`curl.exe -s https://api.ipify.org`).
+6. **Restore** into it, then compare the counts with step 1:
+   ```powershell
+   $new = Read-Host "Paste the NEW External Database URL"; $new = "$new" + "?sslmode=require"
+   docker run --rm -v "${dir}:/backup" postgres:18 pg_restore --no-owner --no-privileges --exit-on-error -d $new "/backup/$file"
+   $counts | docker run --rm -i postgres:18 psql $new
+   ```
+7. **Recreate the API's role** on the new server (section 13, steps 2 and 3, with `$new` in place of `$db`):
+   ```powershell
+   Get-Content tools\db\create-app-role.sql -Raw | docker run --rm -i postgres:16 psql $new
+   'SHOW log_statement; SHOW password_encryption;' | docker run --rm -i postgres:16 psql $new
+   $b = New-Object byte[] 24; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+   $pw = -join ($b | ForEach-Object { $_.ToString('x2') })
+   "ALTER ROLE storefront_app PASSWORD '$pw';" | docker run --rm -i postgres:16 psql -q $new
+   ```
+   Run the password line only if the check shows `none` and `scram-sha-256`.
+8. **Point the API at it.** API service → **Environment** → `ConnectionStrings__Storefront`:
+   - **Host:** take it from the new database's **Internal Database URL** (the `dpg-…-a` part).
+   - **Database name:** the new one.
+   - **Username:** `storefront_app`.
+   - **Password:** `$pw` (`Set-Clipboard $pw`, then Ctrl+V in the browser).
+   - Keep `Port=5432`, `SSL Mode=Require` and `GSS Encryption Mode=Disable`.
+
+   Save; this redeploys.
+9. **Verify:**
+   - `/health/ready` returns 200;
+   - you're still signed in on the site, or can sign in with your existing account;
+   - your earlier orders are under **Your account → Orders**;
+   - a new order goes through;
+   - the logs contain no `permission denied`.
+10. **Record and clean up:**
+    - Note the new database's creation date here and in section 14. Its expiry is 30 days later; the next move falls in the week before.
+    - Set the next reminder.
+    - Run `Set-Clipboard -Value ' '; Remove-Variable pw, b`.
+    - Keep the move dump until the new database has run for a week. It's sensitive, so treat it as section 14 describes.
+
+**If step 6 or 7 fails:** the dump is intact, and the old database is gone in any case. Delete the new database, create another, and repeat steps 4–7. The data is only in the dump, so don't delete it.
 
 ## 10. Frontend: Render Static Site
 
@@ -601,6 +668,6 @@ docker rm -f sf-restore-test | Out-Null
 
 Before the expiry, either:
 - **upgrade** the database to a paid plan, which keeps the data and adds Render's own backups; or
-- **move to a new Free database**: take a backup as above, then follow section 9 and restore the dump into the new database with `pg_restore --no-owner --no-privileges -d <new external URL> <file>`. Then re-run the role script and set the role's password (section 13), and allow your IP on the new database.
+- **move to a new Free database**, keeping the data: follow the checklist in **section 9**. It's the owner's choice, and was rehearsed on 26 October 2026.
 
-Set a reminder for about a week before the expiry, around **16 November 2026**.
+Set a reminder for **16 November 2026**: do the move between 16 and 20 November (section 9).
