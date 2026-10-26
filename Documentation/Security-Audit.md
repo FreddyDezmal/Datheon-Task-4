@@ -663,3 +663,12 @@ The first full-history secret scan found one result, the sample `Idempotency-Key
 - **Still open (manual):** restricting inbound access to the database on Render.
 
 **New, open: FakeStoreAPI refuses requests from Render.** On the evening of 25 October 2026, checkout failed twice with 502 `UPSTREAM_UNAVAILABLE`, because FakeStoreAPI answered 403 to the API while answering 200 elsewhere. The API failed safely, as designed: no order, the cart kept, a reference shown. It's an availability risk of depending on a third-party demo API, not a security flaw. To be retried; the options are in `Deployment.md`, section 13.
+
+### 14.9 Follow-ups on 26 October 2026: external database access (SA-13), backups (SA-17)
+
+- **SA-13, inbound access: fixed.** The database's external URL now accepts one `/32` address, the owner's, instead of Render's default `0.0.0.0/0`. The API's private-network connection is unaffected (`/health/ready` 200). With the role and TLS work in 14.8, **SA-13 is closed**.
+- **SA-17, backups: mitigated, not solved.**
+  - A manual `pg_dump` plus restore check is documented (`Deployment.md`, section 14). The first backup restored with no errors: 2 users, 2 orders, 3 migrations.
+  - The Free database still has no automatic backups, and **expires around 23 November 2026** (created 24 October 2026). Render deletes it around 7 December 2026 unless it's upgraded.
+  - Retention and deletion of customer data remain open.
+- **Checkout against FakeStoreAPI: resolved by itself.** The 403s seen on the evening of 25 October had stopped by the next morning: an order was placed successfully on 26 October at 07:11, as `storefront_app`. If they come back often, the options in `Deployment.md`, section 13 still apply.

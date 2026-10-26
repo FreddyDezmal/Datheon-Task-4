@@ -294,7 +294,7 @@ Before it expires, or straight away if the `.pfx` or its password may have leake
 
 ## 9. Free plan: replacing an expired database
 
-A Free Render PostgreSQL database expires 30 days after it's created and has no backups. When it expires, its data is gone and the API's readiness check fails. Upgrading to a paid plan before then keeps the data. Otherwise, set up a new one the same way:
+A Free Render PostgreSQL database expires 30 days after it's created and has no backups (the current one: created 24 October 2026; see section 14 for dates and backups). When it expires, its data is gone and the API's readiness check fails. Upgrading to a paid plan before then keeps the data. Otherwise, set up a new one the same way:
 
 1. **Create** a new PostgreSQL database on Render, in the same region as the web service.
 2. **Apply the migrations** to it with the reviewed script, as in section 3 (steps 1, 2 and 4), using its **External** URL. Check that both migrations are listed in `__EFMigrationsHistory`.
@@ -562,3 +562,45 @@ Checkout couldn't be tested that evening, for an unrelated reason: FakeStoreAPI 
 **Rollback:** set the username and password in `ConnectionStrings__Storefront` back to the default user's; they're in the database's **Internal Database URL** on Render. Save. The role can stay; it's unused until something connects with it.
 
 **Later migrations:** unchanged. Run them as the owner with the External Database URL (section 11). New tables are granted automatically.
+
+## 14. External access and backups (SA-13, SA-17)
+
+**External access is limited to the owner's IP** (26 October 2026). Render's default rule, `0.0.0.0/0`, let any address try credentials against the database's external URL. The rule now allows one `/32` address, the owner's home connection. It's under the database → **Info** → **Networking** (access control).
+
+These rules apply only to the **external** URL. The API connects over the private network, so it's unaffected. *Verified* after the change: `psql` from home still connects, and `/health/ready` returns 200 in 0.49 s.
+
+Home IPs change from time to time. If a migration or a backup times out, or fails with "connection refused", check `curl.exe -s https://api.ipify.org` and update the rule.
+
+**Backups are manual.** Free Render databases have no backups of any kind. Take one before anything risky (migrations, role changes, a database move), and roughly weekly. Run this in a window with `$db` set (section 11).
+
+`pg_dump` must be at least as new as the server, which runs **PostgreSQL 18**, so use the `postgres:18` image here, not `postgres:16`:
+```powershell
+$dir = "$HOME\Documents\storefront-backups"; New-Item -ItemType Directory -Force $dir | Out-Null
+$file = "storefront-$(Get-Date -Format yyyyMMdd-HHmm).dump"
+docker run --rm -v "${dir}:/backup" postgres:18 pg_dump $db --format=custom --no-owner --no-privileges --file "/backup/$file"
+```
+A backup only counts once it has been restored. Restore it into a throwaway local server and count the rows:
+```powershell
+docker run -d --name sf-restore-test -e POSTGRES_PASSWORD=restore-test -v "${dir}:/backup" postgres:18 | Out-Null
+Start-Sleep 10
+docker exec sf-restore-test createdb -U postgres check
+docker exec sf-restore-test pg_restore -U postgres -d check --no-owner --no-privileges "/backup/$file"
+'SELECT (SELECT count(*) FROM "AspNetUsers") AS users, (SELECT count(*) FROM "Orders") AS orders, (SELECT count(*) FROM "__EFMigrationsHistory") AS migrations;' | docker exec -i sf-restore-test psql -U postgres -d check
+docker rm -f sf-restore-test | Out-Null
+```
+*First backup, 26 October 2026:* `storefront-20261026-1701.dump`, 31 KB. It restored with no errors: 2 users, 2 orders, 3 migrations.
+
+**The dump is sensitive.** It holds customer names and emails, password hashes and the (certificate-encrypted) sign-in keys.
+- Keep it out of the repository.
+- Keep it out of folders that sync to shared storage, unless that's intended.
+- Delete old dumps you no longer need.
+
+`--no-owner --no-privileges` makes it restorable into a database with a different owner. Afterwards, re-run `tools/db/create-app-role.sql` (section 13), because the grants aren't in the dump.
+
+**The database expires.** It was created on **24 October 2026**, when the API went live. Free databases expire 30 days after creation, so this one becomes unreachable around **23 November 2026**. Render then deletes it, with all its data, after a 14-day grace period, around **7 December 2026**, unless it's upgraded to a paid plan.
+
+Before the expiry, either:
+- **upgrade** the database to a paid plan, which keeps the data and adds Render's own backups; or
+- **move to a new Free database**: take a backup as above, then follow section 9 and restore the dump into the new database with `pg_restore --no-owner --no-privileges -d <new external URL> <file>`. Then re-run the role script and set the role's password (section 13), and allow your IP on the new database.
+
+Set a reminder for about a week before the expiry, around **16 November 2026**.
